@@ -44,6 +44,7 @@ from .paper_execution import (
     build_paper_option_order,
     submit_paper_option_order,
 )
+from .payoff import PayoffPolicyConfig, evaluate_payoff_targets
 from .personal import PersonalDecisionConfig, build_personal_shortlist, evaluate_personal_candidate
 from .pipeline import OptionsMarketPipelineConfig, combine_rankings
 from .regime import RegimeConfig, classify_market_regime, regime_direction_fit
@@ -76,6 +77,7 @@ __all__ = [
     "OptionsResearchStore",
     "OutcomeConfig",
     "PaperExecutionConfig",
+    "PayoffPolicyConfig",
     "PersonalDecisionConfig",
     "PortfolioRiskConfig",
     "RegimeConfig",
@@ -98,6 +100,7 @@ __all__ = [
     "compute_chart_snapshot",
     "directional_catalyst_scores",
     "empirical_expected_value",
+    "evaluate_payoff_targets",
     "evaluate_personal_candidate",
     "evaluate_walk_forward",
     "fetch_us_listed_universe",
