@@ -202,7 +202,7 @@ def classify_headline(headline: str) -> dict[str, Any]:
         event_type, volatility_risk, magnitude = "guidance", 0.45, 0.72
     elif _contains(text, r"\b(acquire|acquisition|merger|buyout|takeover)\b"):
         event_type, volatility_risk, magnitude = "m_and_a", 0.55, 0.76
-    elif _contains(text, r"\b(fda|sec |doj|ftc|regulator|regulatory|approval|approved|rejected)\b"):
+    elif _contains(text, r"\b(fda|sec |doj|ftc|regulator|regulatory|approval|approve[sd]?|rejected)\b"):
         event_type, volatility_risk, magnitude = "regulatory", 0.50, 0.70
     elif _contains(text, r"\b(upgrade|downgrade|price target|analyst)\b"):
         event_type, volatility_risk, magnitude = "analyst", 0.18, 0.55
@@ -213,7 +213,7 @@ def classify_headline(headline: str) -> dict[str, Any]:
 
     bullish = _contains(
         text,
-        r"\b(beats?|raises? guidance|raises? outlook|upgrade[sd]?|approved|approval|wins?|awarded|record revenue|record profit|buyback)\b",
+        r"\b(beats?|raises? guidance|raises? outlook|upgrade[sd]?|approve[sd]?|approval|wins?|awarded|record revenue|record profit|buyback)\b",
     )
     bearish = _contains(
         text,
