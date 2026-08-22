@@ -98,13 +98,19 @@ def assess_account_portfolio_risk(
     reasons: list[str] = []
     warnings: list[str] = []
     if cfg.require_complete_premium_risk:
-        missing = [row["contract_symbol"] or row["underlying"] for row in normalized if row["premium_risk_usd"] is None]
+        missing = [
+            row["contract_symbol"] or row["underlying"]
+            for row in normalized
+            if row["premium_risk_usd"] is None
+        ]
         if missing:
             reasons.append("incomplete_position_premium_risk")
             warnings.append(f"Missing premium-risk basis for {len(missing)} position(s).")
     if normalization_errors:
         warnings.extend(normalization_errors)
-        if cfg.block_unsupported_short_options and any("short_option" in item for item in normalization_errors):
+        if cfg.block_unsupported_short_options and any(
+            "short_option" in item for item in normalization_errors
+        ):
             reasons.append("unsupported_short_option_exposure")
 
     risk_rows = [row for row in normalized if row["premium_risk_usd"] is not None]
@@ -144,7 +150,10 @@ def assess_account_portfolio_risk(
         equity=equity,
         threshold=cfg.correlation_threshold,
     )
-    if any(cluster["risk_pct"] > cfg.max_correlated_cluster_risk_pct for cluster in correlations["clusters"]):
+    if any(
+        cluster["risk_pct"] > cfg.max_correlated_cluster_risk_pct
+        for cluster in correlations["clusters"]
+    ):
         reasons.append("correlated_cluster_concentration_limit")
 
     blocked = bool(reasons)
@@ -198,27 +207,39 @@ def risk_summary_from_report(report: Mapping[str, Any]) -> RiskSummary:
     )
 
 
-def _normalize_position(raw: Mapping[str, Any], *, index: int) -> tuple[dict[str, Any] | None, list[str]]:
+def _normalize_position(
+    raw: Mapping[str, Any],
+    *,
+    index: int,
+) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     symbol = str(raw.get("symbol") or raw.get("contract_symbol") or "").strip().upper()
     contract_symbol = str(raw.get("contract_symbol") or symbol or "").strip().upper() or None
     occ = _parse_occ(contract_symbol)
-    underlying = str(raw.get("underlying") or (occ or {}).get("underlying") or symbol).strip().upper()
+    underlying = str(
+        raw.get("underlying") or (occ or {}).get("underlying") or symbol
+    ).strip().upper()
     if underlying.endswith(".US"):
         underlying = underlying[:-3]
     if not underlying:
         return None, [f"position_{index}:missing_underlying"]
 
-    quantity_raw = _finite(raw.get("quantity") if raw.get("quantity") is not None else raw.get("qty"))
+    quantity_raw = _finite(
+        raw.get("quantity") if raw.get("quantity") is not None else raw.get("qty")
+    )
     quantity = 1.0 if quantity_raw is None else quantity_raw
     side = str(raw.get("side") or "long").strip().lower()
     is_short = quantity < 0 or side in {"short", "sell", "short_sell"}
     quantity_abs = abs(quantity)
-    asset_class = str(raw.get("asset_class") or ("option" if occ or raw.get("option_type") else "unknown")).lower()
+    asset_class = str(
+        raw.get("asset_class") or ("option" if occ or raw.get("option_type") else "unknown")
+    ).lower()
     if asset_class == "option" and is_short:
         errors.append(f"position_{index}:short_option_requires_defined_max_loss")
 
-    option_type = str(raw.get("option_type") or (occ or {}).get("option_type") or "").lower() or None
+    option_type = str(
+        raw.get("option_type") or (occ or {}).get("option_type") or ""
+    ).lower() or None
     expiration = _expiration_text(raw.get("expiration") or (occ or {}).get("expiration"))
     multiplier = _positive(raw.get("multiplier")) or (100.0 if asset_class == "option" else 1.0)
 
@@ -231,7 +252,11 @@ def _normalize_position(raw: Mapping[str, Any], *, index: int) -> tuple[dict[str
         if per_contract_loss is not None:
             premium_risk = per_contract_loss * quantity_abs
     if premium_risk is None and not is_short:
-        avg_entry = _positive(raw.get("avg_entry_price") or raw.get("average_cost") or raw.get("entry_price"))
+        avg_entry = _positive(
+            raw.get("avg_entry_price")
+            or raw.get("average_cost")
+            or raw.get("entry_price")
+        )
         if avg_entry is not None:
             premium_risk = avg_entry * multiplier * quantity_abs
 
@@ -243,7 +268,11 @@ def _normalize_position(raw: Mapping[str, Any], *, index: int) -> tuple[dict[str
 
     sign = -1.0 if is_short else 1.0
     delta_shares = None if delta is None else delta * multiplier * quantity_abs * sign
-    dollar_delta = None if delta_shares is None or underlying_price is None else delta_shares * underlying_price
+    dollar_delta = (
+        None
+        if delta_shares is None or underlying_price is None
+        else delta_shares * underlying_price
+    )
     gamma_scaled = None if gamma is None else gamma * multiplier * quantity_abs * sign
     theta_scaled = None if theta is None else theta * multiplier * quantity_abs * sign
     vega_scaled = None if vega is None else vega * multiplier * quantity_abs * sign
@@ -261,7 +290,9 @@ def _normalize_position(raw: Mapping[str, Any], *, index: int) -> tuple[dict[str
         "side": "short" if is_short else "long",
         "multiplier": multiplier,
         "premium_risk_usd": _round_or_none(premium_risk),
-        "market_value_usd": _round_or_none(_abs_finite(raw.get("market_value") or raw.get("market_value_usd"))),
+        "market_value_usd": _round_or_none(
+            _abs_finite(raw.get("market_value") or raw.get("market_value_usd"))
+        ),
         "underlying_price": _round_or_none(underlying_price),
         "delta": delta,
         "gamma": gamma,
@@ -291,7 +322,9 @@ def _aggregate_greeks(rows: list[Mapping[str, Any]], equity: float) -> dict[str,
         output[output_name] = round(sum(known), 6) if known else None
         coverage[output_name] = {"known": len(known), "positions": len(rows)}
     dollar_delta = _finite(output.get("dollar_delta_usd"))
-    output["dollar_delta_pct_equity"] = None if dollar_delta is None else round(dollar_delta / equity * 100.0, 4)
+    output["dollar_delta_pct_equity"] = (
+        None if dollar_delta is None else round(dollar_delta / equity * 100.0, 4)
+    )
     output["coverage"] = coverage
     return output
 
@@ -312,7 +345,11 @@ def _risk_buckets(
         risk = _nonnegative(row.get("premium_risk_usd")) or 0.0
         totals[key] = totals.get(key, 0.0) + risk
     result = [
-        {"key": key, "risk_usd": round(value, 2), "risk_pct": round(value / equity * 100.0, 4)}
+        {
+            "key": key,
+            "risk_usd": round(value, 2),
+            "risk_pct": round(value / equity * 100.0, 4),
+        }
         for key, value in totals.items()
     ]
     result.sort(key=lambda row: (-float(row["risk_usd"]), str(row["key"])))
@@ -330,11 +367,15 @@ def _correlation_clusters(
     for row in risk_rows:
         symbol = str(row.get("underlying") or "").upper()
         if symbol:
-            risk_by_symbol[symbol] = risk_by_symbol.get(symbol, 0.0) + (_nonnegative(row.get("premium_risk_usd")) or 0.0)
+            risk_by_symbol[symbol] = risk_by_symbol.get(symbol, 0.0) + (
+                _nonnegative(row.get("premium_risk_usd")) or 0.0
+            )
 
     series: dict[str, pd.Series] = {}
     for symbol in risk_by_symbol:
-        raw = returns_by_underlying.get(symbol) or returns_by_underlying.get(f"{symbol}.US")
+        raw = returns_by_underlying.get(symbol)
+        if raw is None:
+            raw = returns_by_underlying.get(f"{symbol}.US")
         if raw is None:
             continue
         clean = pd.Series(raw, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
@@ -369,7 +410,9 @@ def _correlation_clusters(
             if abs(value) >= threshold:
                 graph[left].add(right)
                 graph[right].add(left)
-                pairs.append({"left": left, "right": right, "correlation": round(value, 4)})
+                pairs.append(
+                    {"left": left, "right": right, "correlation": round(value, 4)}
+                )
 
     visited: set[str] = set()
     clusters: list[dict[str, Any]] = []
@@ -404,7 +447,9 @@ def _correlation_clusters(
     }
 
 
-def _drawdown(equity_curve: pd.Series | Iterable[float] | None) -> dict[str, Any] | None:
+def _drawdown(
+    equity_curve: pd.Series | Iterable[float] | None,
+) -> dict[str, Any] | None:
     if equity_curve is None:
         return None
     try:
@@ -412,7 +457,10 @@ def _drawdown(equity_curve: pd.Series | Iterable[float] | None) -> dict[str, Any
     except (TypeError, ValueError):
         return None
     return {
-        "max_drawdown_pct": round(float(report.get("max_drawdown") or 0.0) * 100.0, 4),
+        "max_drawdown_pct": round(
+            float(report.get("max_drawdown") or 0.0) * 100.0,
+            4,
+        ),
         "recovered": bool(report.get("recovered")),
         "peak_date": _json_value(report.get("peak_date")),
         "trough_date": _json_value(report.get("trough_date")),
