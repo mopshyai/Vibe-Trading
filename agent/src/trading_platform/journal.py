@@ -29,6 +29,7 @@ class JournalStage(str, Enum):
     FILLED = "filled"
     EXIT_PROPOSED = "exit_proposed"
     EXITED = "exited"
+    OUTCOME_OBSERVED = "outcome_observed"
     CANCELLED = "cancelled"
     EXPIRED = "expired"
     ERROR = "error"

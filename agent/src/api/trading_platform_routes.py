@@ -1,8 +1,8 @@
 """Read-only Trading Desk HTTP routes.
 
-The routes expose the latest durable platform snapshot, audit events and candidate
-journal. They do not accept order payloads and do not import any broker mutation
-functions.
+The routes expose the latest durable platform snapshot, audit events, candidate
+journal and retrospective attribution. They do not accept order payloads and do
+not import any broker mutation functions.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Depends, FastAPI, Query
 
 from src.config.paths import get_runtime_root
-from src.trading_platform import TradingPlatformStore
+from src.trading_platform import TradingPlatformStore, build_attribution_report
 
 AuthDep = Callable[..., Awaitable[Any] | Any]
 
@@ -84,6 +84,22 @@ def register_trading_platform_routes(
                     symbol=symbol,
                     contract_symbol=contract_symbol,
                 ),
+            }
+
+    @app.get("/api/trading-desk/attribution", dependencies=[Depends(require_auth)])
+    async def get_trading_desk_attribution(
+        limit: int = Query(2000, ge=1, le=2000),
+    ) -> dict[str, Any]:
+        path = _platform_store_path()
+        if not path.exists():
+            return {
+                "status": "ok",
+                "attribution": build_attribution_report([]),
+            }
+        with TradingPlatformStore(path) as store:
+            return {
+                "status": "ok",
+                "attribution": build_attribution_report(store.recent_journal(limit)),
             }
 
 

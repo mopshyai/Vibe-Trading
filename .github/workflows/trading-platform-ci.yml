@@ -31,6 +31,7 @@ on:
       - "scripts/assess_account_risk.py"
       - "scripts/run_paper_option_lifecycle.py"
       - "scripts/evaluate_paper_exits.py"
+      - "scripts/checkpoint_candidate_outcomes.py"
       - "scripts/trading_platform_preflight.py"
       - "agent/requirements-market-calendar.txt"
       - "requirements-market-calendar-lock.txt"
@@ -55,10 +56,10 @@ jobs:
           python -m pip install --upgrade pip pytest pydantic duckdb numpy pandas scipy requests
           python -m pip install --require-hashes --no-deps -r requirements-market-calendar-lock.txt
           python -c "import exchange_calendars as xcals; assert 'XNYS' in xcals.get_calendar_names()"
-      - name: Compile platform modules, data/catalyst/risk/paper/exit CLIs and API assembler
+      - name: Compile platform modules, data/catalyst/risk/paper/exit/learning CLIs and API assembler
         run: |
           python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py agent/src/options_market/paper_execution.py agent/src/options_market/catalyst_store.py agent/src/options_market/alpaca_news.py
-          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/assess_account_risk.py scripts/run_paper_option_lifecycle.py scripts/evaluate_paper_exits.py scripts/trading_platform_preflight.py
+          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/assess_account_risk.py scripts/run_paper_option_lifecycle.py scripts/evaluate_paper_exits.py scripts/checkpoint_candidate_outcomes.py scripts/trading_platform_preflight.py
       - name: Run platform, catalyst, paper and personal-decision tests
         env:
           PYTHONPATH: agent
