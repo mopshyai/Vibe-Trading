@@ -1,7 +1,8 @@
 """Read-only Trading Desk HTTP routes.
 
-The routes expose the latest durable platform snapshot and audit events. They do
-not accept order payloads and do not import any broker mutation functions.
+The routes expose the latest durable platform snapshot, audit events and candidate
+journal. They do not accept order payloads and do not import any broker mutation
+functions.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ def register_trading_platform_routes(
             return {
                 "status": "ok",
                 "snapshot": None,
-                "counts": {"snapshots": 0, "events": 0},
+                "counts": {"snapshots": 0, "events": 0, "journal": 0},
                 "store": "not_initialized",
             }
         with TradingPlatformStore(path) as store:
@@ -65,6 +66,25 @@ def register_trading_platform_routes(
             return {"status": "ok", "events": []}
         with TradingPlatformStore(path) as store:
             return {"status": "ok", "events": store.recent_events(limit)}
+
+    @app.get("/api/trading-desk/journal", dependencies=[Depends(require_auth)])
+    async def get_trading_desk_journal(
+        limit: int = Query(100, ge=1, le=500),
+        symbol: str | None = Query(default=None, max_length=32),
+        contract_symbol: str | None = Query(default=None, max_length=64),
+    ) -> dict[str, Any]:
+        path = _platform_store_path()
+        if not path.exists():
+            return {"status": "ok", "journal": []}
+        with TradingPlatformStore(path) as store:
+            return {
+                "status": "ok",
+                "journal": store.recent_journal(
+                    limit,
+                    symbol=symbol,
+                    contract_symbol=contract_symbol,
+                ),
+            }
 
 
 __all__ = ["register_trading_platform_routes"]

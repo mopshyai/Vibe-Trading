@@ -95,6 +95,45 @@ export interface TradingDeskEvent {
   payload: Record<string, unknown>;
 }
 
+export interface TradingDeskJournalEntry {
+  journal_id: string;
+  occurred_at: string;
+  stage:
+    | "evaluated"
+    | "rejected"
+    | "watch"
+    | "trade_ready"
+    | "proposed"
+    | "approved"
+    | "submitted"
+    | "partial_fill"
+    | "filled"
+    | "exit_proposed"
+    | "exited"
+    | "cancelled"
+    | "expired"
+    | "error";
+  environment: "research" | "paper" | "live";
+  snapshot_id?: string | null;
+  source_cycle?: number | null;
+  symbol: string;
+  contract_symbol?: string | null;
+  decision?: DeskDecision | null;
+  displayed?: boolean | null;
+  composite_score?: number | null;
+  ranking_score?: number | null;
+  option_quality_score?: number | null;
+  regime_fit_score?: number | null;
+  expected_return_pct?: number | null;
+  lower_confidence_bound_pct?: number | null;
+  ev_samples?: number | null;
+  hard_reasons: string[];
+  watch_reasons: string[];
+  broker_order_id?: string | null;
+  fill_price?: number | null;
+  realized_pnl_usd?: number | null;
+}
+
 async function json<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: authHeaders() });
   if (!response.ok) {
@@ -112,11 +151,18 @@ export const tradingDeskApi = {
   getLatest: () => json<{
     status: string;
     snapshot: TradingDeskSnapshot | null;
-    counts: { snapshots: number; events: number };
+    counts: { snapshots: number; events: number; journal?: number };
     store: string;
   }>("/api/trading-desk"),
   getEvents: (limit = 30) =>
     json<{ status: string; events: TradingDeskEvent[] }>(
       `/api/trading-desk/events?limit=${encodeURIComponent(String(limit))}`,
     ),
+  getJournal: (limit = 50, symbol?: string) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (symbol) query.set("symbol", symbol);
+    return json<{ status: string; journal: TradingDeskJournalEntry[] }>(
+      `/api/trading-desk/journal?${query.toString()}`,
+    );
+  },
 };
