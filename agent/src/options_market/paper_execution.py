@@ -9,17 +9,25 @@ This module is deliberately narrower than the general Alpaca connector:
 - explicit EV, walk-forward and portfolio-risk approvals by default;
 - dry-run by default.
 
-It is intended as the final research-to-paper seam.  It cannot place a live
-order even if a live Alpaca config is supplied.
+Actual paper submission uses Alpaca's HTTPS trading endpoint directly (or the
+existing TAP forwarding path when enabled), so the production image does not
+need the optional ``alpaca-py`` SDK merely to submit one validated paper order.
+The REST mutation remains unreachable for non-paper profiles.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
 import math
 import re
 from typing import Any, Mapping
 
+import requests
+
+from src.trading import tap_forward
 from src.trading.connectors.alpaca import sdk as alpaca_sdk
 
 
@@ -175,13 +183,13 @@ def submit_paper_option_order(
     risk_report: Mapping[str, Any] | None = None,
     alpaca_config: alpaca_sdk.AlpacaConfig | None = None,
     config: PaperExecutionConfig | None = None,
+    session: requests.Session | None = None,
 ) -> dict[str, Any]:
     """Submit one validated long option to Alpaca **paper only**.
 
-    ``dry_run`` defaults to true.  A caller that intentionally wants a paper
+    ``dry_run`` defaults to true. A caller that intentionally wants a paper
     broker mutation must construct ``PaperExecutionConfig(dry_run=False)``.
-    Even then, a non-paper Alpaca profile is rejected before the connector's
-    order function is reached.
+    Even then, a non-paper Alpaca profile is rejected before any POST occurs.
     """
     cfg = config or PaperExecutionConfig()
     plan = build_paper_option_order(
@@ -199,7 +207,7 @@ def submit_paper_option_order(
         return plan
 
     broker_cfg = alpaca_config or alpaca_sdk.load_config()
-    if not broker_cfg.is_paper or broker_cfg.profile != "paper":
+    if not broker_cfg.is_paper or broker_cfg.profile != "paper" or broker_cfg.host != alpaca_sdk.PAPER_HOST:
         return {
             **plan,
             "ready": False,
@@ -219,14 +227,12 @@ def submit_paper_option_order(
         return {**plan, "decision": "PAPER_ORDER_DRY_RUN", "submitted": False}
 
     order = plan["order"]
-    result = alpaca_sdk.place_order(
+    result = _submit_validated_paper_rest_order(
         broker_cfg,
         symbol=str(order["symbol"]),
-        side="buy",
         quantity=int(order["quantity"]),
-        order_type="limit",
         limit_price=float(order["limit_price"]),
-        time_in_force="day",
+        session=session,
     )
     if result.get("status") != "ok" or not result.get("is_paper"):
         return {
@@ -240,6 +246,108 @@ def submit_paper_option_order(
         "decision": "PAPER_ORDER_SUBMITTED",
         "submitted": True,
         "broker_result": result,
+    }
+
+
+def _submit_validated_paper_rest_order(
+    config: alpaca_sdk.AlpacaConfig,
+    *,
+    symbol: str,
+    quantity: int,
+    limit_price: float,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """POST one already-validated buy-limit option order to Alpaca paper only."""
+    if not config.is_paper or config.profile != "paper" or config.host != alpaca_sdk.PAPER_HOST:
+        return {"status": "error", "is_paper": False, "error": "paper profile required"}
+
+    # Same order on the same UTC day receives the same client id. This is a
+    # conservative retry guard: an ambiguous timeout can be retried without
+    # silently doubling the paper position. A deliberate second identical order
+    # should be represented by a distinct candidate/snapshot workflow.
+    idempotency_basis = "|".join(
+        [
+            datetime.now(timezone.utc).date().isoformat(),
+            symbol,
+            str(quantity),
+            f"{limit_price:.4f}",
+            "buy",
+            "limit",
+            "day",
+        ]
+    )
+    payload = {
+        "symbol": symbol,
+        "qty": str(quantity),
+        "side": "buy",
+        "type": "limit",
+        "limit_price": f"{limit_price:.4f}",
+        "time_in_force": "day",
+        "client_order_id": "vibe-paper-" + hashlib.sha256(idempotency_basis.encode()).hexdigest()[:24],
+    }
+    target = f"{alpaca_sdk.PAPER_HOST}/v2/orders"
+
+    if tap_forward.tap_enabled():
+        forwarded = tap_forward.forward(
+            target,
+            "POST",
+            json.dumps(payload),
+            alpaca_sdk._tap_cred_headers(),  # noqa: SLF001 - shared credential placeholders
+        )
+        if not forwarded.get("ok"):
+            decision = forwarded.get("decision")
+            reason = forwarded.get("error") or decision or "paper order not forwarded by TAP"
+            return {"status": "error", "is_paper": True, "error": f"TAP: {reason}", "tap_decision": decision}
+        body = forwarded.get("body")
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except ValueError:
+                body = {}
+        response_payload = body if isinstance(body, Mapping) else {}
+        via = "tap"
+    else:
+        if not config.api_key or not config.secret_key:
+            return {"status": "error", "is_paper": True, "error": "Alpaca paper credentials are not configured"}
+        client = session or requests.Session()
+        try:
+            response = client.post(
+                target,
+                json=payload,
+                headers={
+                    "APCA-API-KEY-ID": config.api_key,
+                    "APCA-API-SECRET-KEY": config.secret_key,
+                },
+                timeout=config.timeout,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except requests.RequestException as exc:
+            return {"status": "error", "is_paper": True, "error": str(exc)}
+        except ValueError as exc:
+            return {"status": "error", "is_paper": True, "error": f"invalid Alpaca JSON response: {exc}"}
+        response_payload = body if isinstance(body, Mapping) else {}
+        via = "rest"
+
+    order_id = str(response_payload.get("id") or response_payload.get("order_id") or "").strip()
+    if not order_id:
+        return {"status": "error", "is_paper": True, "error": "Alpaca paper response missing order id"}
+    return {
+        "status": "ok",
+        "order_id": order_id,
+        "symbol": str(response_payload.get("symbol") or symbol),
+        "side": str(response_payload.get("side") or "buy"),
+        "profile": "paper",
+        "is_paper": True,
+        "order_type": str(response_payload.get("type") or response_payload.get("order_type") or "limit"),
+        "time_in_force": str(response_payload.get("time_in_force") or "day"),
+        "quantity": _finite(response_payload.get("qty")) or float(quantity),
+        "notional": None,
+        "limit_price": _finite(response_payload.get("limit_price")) or limit_price,
+        "order_status": str(response_payload.get("status") or ""),
+        "filled_qty": response_payload.get("filled_qty"),
+        "client_order_id": payload["client_order_id"],
+        "via": via,
     }
 
 
