@@ -46,6 +46,7 @@ from .paper_execution import (
 )
 from .payoff import PayoffPolicyConfig, evaluate_payoff_targets
 from .personal import PersonalDecisionConfig, build_personal_shortlist, evaluate_personal_candidate
+from .personal_service import PersonalAccountState, PersonalContinuousOptionsService, PersonalEvidence
 from .pipeline import OptionsMarketPipelineConfig, combine_rankings
 from .regime import RegimeConfig, classify_market_regime, regime_direction_fit
 from .replay import ReplayConfig, label_replay_candidates, replay_many, replay_selection_at
@@ -78,7 +79,10 @@ __all__ = [
     "OutcomeConfig",
     "PaperExecutionConfig",
     "PayoffPolicyConfig",
+    "PersonalAccountState",
+    "PersonalContinuousOptionsService",
     "PersonalDecisionConfig",
+    "PersonalEvidence",
     "PortfolioRiskConfig",
     "RegimeConfig",
     "ReplayConfig",
