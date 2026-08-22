@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Assess current personal-account risk without mutating a broker.
 
-Inputs can come from a JSON fixture/export or the existing read-only Alpaca
-account/positions connector. Optional enrichment JSON can add Greeks, underlying
-prices, sectors or themes keyed by contract/symbol.
+Inputs can come from a JSON fixture/export or the dependency-free Alpaca paper
+account/positions REST reader. Optional enrichment JSON can add Greeks,
+underlying prices, sectors or themes keyed by contract/symbol.
 """
 
 from __future__ import annotations
@@ -21,19 +21,20 @@ AGENT = ROOT / "agent"
 if str(AGENT) not in sys.path:
     sys.path.insert(0, str(AGENT))
 
-from src.trading.connectors.alpaca import sdk as alpaca_sdk  # noqa: E402
+from src.trading_platform.paper_broker_read import fetch_paper_account_positions  # noqa: E402
 from src.trading_platform.portfolio_risk import (  # noqa: E402
     AccountRiskConfig,
     assess_account_portfolio_risk,
     risk_summary_from_report,
 )
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Assess personal account portfolio risk")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--positions-json", type=Path, help="JSON list or {positions:[...], equity:...}")
-    source.add_argument("--alpaca-account", action="store_true", help="Use configured Alpaca account/positions reads")
+    source.add_argument("--alpaca-account", action="store_true", help="Use configured Alpaca PAPER account/positions reads")
     parser.add_argument("--account-equity", type=float, help="Override/provide account equity")
     parser.add_argument("--enrichment-json", type=Path, help="Contract/symbol -> Greeks/sector/spot mapping")
     parser.add_argument("--returns-json", type=Path, help="Underlying -> return-series mapping")
@@ -48,10 +49,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.alpaca_account:
-        account = alpaca_sdk.get_account_snapshot()
-        positions_result = alpaca_sdk.get_positions()
-        positions = [dict(row) for row in positions_result.get("positions", []) if isinstance(row, Mapping)]
-        account_equity = _number(args.account_equity) or _number(account.get("account", {}).get("equity"))
+        broker_state = fetch_paper_account_positions(load_alpaca_runtime_config())
+        account = broker_state.get("account") if isinstance(broker_state.get("account"), Mapping) else {}
+        positions = [dict(row) for row in broker_state.get("positions", []) if isinstance(row, Mapping)]
+        account_equity = _number(args.account_equity) or _number(account.get("equity"))
+        if bool(account.get("trading_blocked")) or bool(account.get("account_blocked")) or bool(account.get("trade_suspended_by_user")):
+            # Preserve the broker control in the risk report through an explicit
+            # impossible-to-ignore synthetic reason rather than attempting any mutation.
+            broker_blocked = True
+        else:
+            broker_blocked = False
     else:
         payload = _json(args.positions_json)
         if isinstance(payload, list):
@@ -66,6 +73,7 @@ def main() -> int:
         else:
             raise ValueError("positions JSON must be a list or object")
         account_equity = _number(args.account_equity) or embedded_equity
+        broker_blocked = False
 
     if account_equity is None or account_equity <= 0:
         raise ValueError("account equity is required and must be positive")
@@ -84,6 +92,15 @@ def main() -> int:
         returns_by_underlying=returns,
         config=AccountRiskConfig(),
     )
+    if broker_blocked:
+        reasons = list(report.get("blocking_reasons") or [])
+        if "broker_account_trading_blocked" not in reasons:
+            reasons.append("broker_account_trading_blocked")
+        report["blocking_reasons"] = reasons
+        report["trading_blocked"] = True
+        report["approved"] = False
+        report["decision"] = "ACCOUNT_RISK_BLOCKED"
+
     summary = risk_summary_from_report(report)
     rendered = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False, default=str) + "\n"
     if args.output:
