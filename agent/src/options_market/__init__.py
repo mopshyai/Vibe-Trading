@@ -1,12 +1,19 @@
 """Institutional-style U.S. options market research pipeline."""
 
 from .alpaca_current import AlpacaCurrentOptionsConfig, AlpacaCurrentOptionsReader
+from .alpaca_news import (
+    AlpacaNewsConfig,
+    AlpacaNewsReader,
+    article_to_catalyst_rows,
+    classify_headline,
+)
 from .catalyst import (
     CatalystEvent,
     CatalystScoreConfig,
     directional_catalyst_scores,
     score_catalysts,
 )
+from .catalyst_store import CatalystEventStore
 from .chart_screen import (
     ChartScreenConfig,
     ChartSnapshot,
@@ -59,9 +66,12 @@ from .walkforward import WalkForwardConfig, evaluate_walk_forward
 __all__ = [
     "AlpacaCurrentOptionsConfig",
     "AlpacaCurrentOptionsReader",
+    "AlpacaNewsConfig",
+    "AlpacaNewsReader",
     "AnalysisPlan",
     "AtomicAnalysisStateStore",
     "CatalystEvent",
+    "CatalystEventStore",
     "CatalystScoreConfig",
     "ChartScreenConfig",
     "ChartSnapshot",
@@ -89,6 +99,7 @@ __all__ = [
     "TradingSession",
     "USListing",
     "WalkForwardConfig",
+    "article_to_catalyst_rows",
     "assess_option_quality",
     "assess_portfolio_risk",
     "build_alert_event",
@@ -98,6 +109,7 @@ __all__ = [
     "calibrate_score_buckets",
     "candidate_ev_gate",
     "choose_score_threshold",
+    "classify_headline",
     "classify_market_phase",
     "classify_market_regime",
     "combine_rankings",
