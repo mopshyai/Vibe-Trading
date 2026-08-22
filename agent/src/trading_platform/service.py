@@ -96,6 +96,7 @@ class TradingPlatformService:
                     "execution_mode": snapshot.execution_mode.value,
                     "account_risk_blocked": snapshot.risk.trading_blocked,
                     "account_risk_reasons": list(snapshot.risk.blocking_reasons),
+                    "paper_execution_status": _execution_status(cycle),
                 },
             )
         )
@@ -109,10 +110,7 @@ class TradingPlatformService:
         for raw in journal_rows:
             if not isinstance(raw, Mapping):
                 continue
-            entry = _journal_entry(
-                raw,
-                snapshot=snapshot,
-            )
+            entry = _journal_entry(raw, snapshot=snapshot)
             if entry is None:
                 continue
             self.store.append_journal_entry(entry)
@@ -151,19 +149,12 @@ class TradingPlatformService:
         }
 
 
-def _journal_entry(
-    raw: Mapping[str, Any],
-    *,
-    snapshot: TradingDeskSnapshot,
-) -> JournalEntry | None:
+def _journal_entry(raw: Mapping[str, Any], *, snapshot: TradingDeskSnapshot) -> JournalEntry | None:
     symbol = str(raw.get("symbol") or "").strip().upper()
     if not symbol:
         return None
     decision = _decision(raw.get("decision"))
-    if decision is DeskDecision.NO_DATA:
-        decision_value: DeskDecision | None = None
-    else:
-        decision_value = decision
+    decision_value: DeskDecision | None = None if decision is DeskDecision.NO_DATA else decision
     return JournalEntry(
         stage=stage_for_decision(decision_value),
         environment=snapshot.environment,
@@ -193,11 +184,7 @@ def _journal_entry(
         watch_reasons=_strings(raw.get("watch_reasons")),
         data_source=_text(raw.get("data_source")),
         option_feed=_text(raw.get("option_feed")),
-        execution_grade_feed=(
-            bool(raw.get("execution_grade_feed"))
-            if raw.get("execution_grade_feed") is not None
-            else None
-        ),
+        execution_grade_feed=(bool(raw.get("execution_grade_feed")) if raw.get("execution_grade_feed") is not None else None),
     )
 
 
@@ -207,6 +194,16 @@ def _execution_mode(environment: PlatformEnvironment) -> ExecutionMode:
     if environment is PlatformEnvironment.LIVE:
         return ExecutionMode.LIVE_DISABLED
     return ExecutionMode.RESEARCH_ONLY
+
+
+def _execution_status(cycle: Mapping[str, Any]) -> str | None:
+    execution = cycle.get("execution")
+    if isinstance(execution, Mapping):
+        mode = str(execution.get("mode") or "").strip().lower()
+        status = str(execution.get("status") or "").strip()
+        return f"{mode}:{status}" if mode and status else mode or status or None
+    token = str(execution or "").strip()
+    return token or None
 
 
 def _decision(value: object) -> DeskDecision:
@@ -271,8 +268,14 @@ def _warnings(cycle: Mapping[str, Any], dashboard: Mapping[str, Any]) -> list[st
     disclaimer = _text(dashboard.get("disclaimer"))
     if disclaimer:
         warnings.append(disclaimer)
-    if str(cycle.get("execution") or "none") != "none":
-        warnings.append("Unexpected execution marker observed; TradingPlatformService did not execute it.")
+
+    execution = cycle.get("execution")
+    if isinstance(execution, Mapping):
+        mode = str(execution.get("mode") or "").strip().lower()
+        if mode and mode != "supervised_paper":
+            warnings.append(f"Unknown execution mode observed: {mode}; TradingPlatformService did not execute it.")
+    elif execution not in (None, "", "none"):
+        warnings.append("Legacy/unknown execution marker observed; TradingPlatformService did not execute it.")
     return list(dict.fromkeys(warnings))
 
 
