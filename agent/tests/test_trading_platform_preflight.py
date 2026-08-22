@@ -22,6 +22,21 @@ def _paper() -> AlpacaConfig:
     return AlpacaConfig(api_key="paper-key", secret_key="paper-secret", profile="paper")
 
 
+def _ready_history() -> dict:
+    return {
+        "provider_configured": True,
+        "replay_ready": True,
+        "evidence_ready": True,
+        "checks": {
+            "historical_provider": {"ok": True},
+            "historical_research_store": {"ok": True},
+            "historical_outcomes": {"ok": True, "outcome_count": 100},
+            "candidate_evidence_artifact": {"ok": True},
+        },
+        "operator_actions": [],
+    }
+
+
 def _publish_ready_snapshot(path) -> None:
     snapshot = TradingDeskSnapshot(
         environment=PlatformEnvironment.PAPER,
@@ -47,6 +62,7 @@ def test_preflight_can_be_fully_ready_with_passing_runtime(tmp_path, monkeypatch
     store_path = tmp_path / "desk.duckdb"
     _publish_ready_snapshot(store_path)
     monkeypatch.setattr(module, "_calendar_check", lambda: {"ok": True, "version": "4.13.2"})
+    monkeypatch.setattr(module, "_historical_readiness", lambda *_args, **_kwargs: _ready_history())
     monkeypatch.setattr(
         module,
         "_fetch_paper_account",
@@ -62,7 +78,6 @@ def test_preflight_can_be_fully_ready_with_passing_runtime(tmp_path, monkeypatch
         "fetch_current_option_quote",
         lambda *args, **kwargs: {"bid": 2.69, "ask": 2.72, "age_seconds": 1.0, "feed": "opra"},
     )
-    monkeypatch.setenv("DATABENTO_API_KEY", "test-only")
     result = run_platform_preflight(
         store_path=store_path,
         alpaca_config=_paper(),
@@ -76,7 +91,9 @@ def test_preflight_can_be_fully_ready_with_passing_runtime(tmp_path, monkeypatch
     )
     assert result["platform_operational"] is True
     assert result["research_data_ready"] is True
+    assert result["historical_provider_configured"] is True
     assert result["historical_replay_ready"] is True
+    assert result["historical_evidence_ready"] is True
     assert result["paper_runtime_ready"] is True
     assert result["paper_submit_ready_now"] is True
     assert result["operator_actions"] == []
@@ -98,11 +115,32 @@ def test_preflight_reports_external_actions_without_exposing_secret(tmp_path, mo
     )
     assert result["platform_operational"] is True
     assert result["paper_runtime_ready"] is False
+    assert result["historical_provider_configured"] is False
+    assert result["historical_replay_ready"] is False
+    assert result["historical_evidence_ready"] is False
     assert "configure_alpaca_paper_credentials_in_runtime_or_TAP" in result["operator_actions"]
-    assert "set_DATABENTO_API_KEY_in_runtime_for_historical_replay" in result["operator_actions"]
+    assert "set_DATABENTO_API_KEY_in_runtime_for_historical_backfill" in result["operator_actions"]
+    assert "review_backfill_plan_then_populate_point_in_time_research_store" in result["operator_actions"]
     rendered = str(result)
     assert "secret_key" not in rendered
     assert "api_key" not in rendered
+
+
+def test_databento_key_alone_does_not_claim_replay_ready(tmp_path, monkeypatch) -> None:
+    from src.trading_platform import preflight as module
+
+    store_path = tmp_path / "desk.duckdb"
+    _publish_ready_snapshot(store_path)
+    monkeypatch.setattr(module, "_calendar_check", lambda: {"ok": True, "version": "4.13.2"})
+    monkeypatch.setenv("DATABENTO_API_KEY", "configured-but-no-data")
+    result = run_platform_preflight(
+        store_path=store_path,
+        alpaca_config=AlpacaConfig(profile="paper"),
+        now=NOW,
+    )
+    assert result["historical_provider_configured"] is True
+    assert result["historical_replay_ready"] is False
+    assert result["historical_evidence_ready"] is False
 
 
 def test_market_closed_is_condition_not_operator_setup_action(tmp_path, monkeypatch) -> None:
@@ -111,6 +149,7 @@ def test_market_closed_is_condition_not_operator_setup_action(tmp_path, monkeypa
     store_path = tmp_path / "desk.duckdb"
     _publish_ready_snapshot(store_path)
     monkeypatch.setattr(module, "_calendar_check", lambda: {"ok": True, "version": "4.13.2"})
+    monkeypatch.setattr(module, "_historical_readiness", lambda *_args, **_kwargs: _ready_history())
     monkeypatch.setattr(
         module,
         "_fetch_paper_account",
@@ -126,7 +165,6 @@ def test_market_closed_is_condition_not_operator_setup_action(tmp_path, monkeypa
         "fetch_current_option_quote",
         lambda *args, **kwargs: {"bid": 2.69, "ask": 2.72, "age_seconds": 1.0, "feed": "opra"},
     )
-    monkeypatch.setenv("DATABENTO_API_KEY", "test-only")
     result = run_platform_preflight(
         store_path=store_path,
         alpaca_config=_paper(),
