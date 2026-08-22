@@ -154,8 +154,6 @@ def evaluate_long_option_exit(
     account_risk_exit = bool(position.get("account_risk_exit_required"))
     reasons: list[str] = []
 
-    # Risk/thesis exits outrank price targets. The policy only proposes; it does
-    # not infer that a stale or missing quote is safe to trade against.
     if account_risk_exit:
         reasons.append("account_risk_exit_required")
     if thesis_valid is False:
@@ -227,31 +225,36 @@ def scan_long_option_exits(
     results: list[dict[str, Any]] = []
     proposed = 0
     blocked = 0
+    journal_appended = 0
     for raw in positions:
         contract = str(
             raw.get("contract_symbol") or raw.get("symbol") or ""
         ).strip().upper().replace(" ", "")
         quote = quotes_by_contract.get(contract) or {}
         result = evaluate_long_option_exit(raw, quote, now=observed_at, config=cfg)
-        results.append(result)
         if result["exit_proposed"]:
             proposed += 1
+            appended = False
             if store is not None:
-                _append_exit_proposal(
+                appended = _append_exit_proposal(
                     raw,
                     result,
                     store=store,
                     system=identity,
                     snapshot_id=snapshot_id,
                 )
+                journal_appended += int(appended)
+            result["journal_appended"] = appended
         elif result["decision"] == "NO_ACTION":
             blocked += 1
+        results.append(result)
 
     return {
         "status": "ok" if blocked == 0 else "degraded",
         "observed_at": observed_at.isoformat(),
         "positions_evaluated": len(results),
         "exit_proposals": proposed,
+        "journal_appended": journal_appended,
         "blocked_no_action": blocked,
         "results": results,
         "policy": asdict(cfg),
@@ -266,8 +269,20 @@ def _append_exit_proposal(
     store: TradingPlatformStore,
     system: SystemIdentity,
     snapshot_id: str | None,
-) -> None:
+) -> bool:
     contract = str(result.get("contract_symbol") or "").strip().upper()
+    current_reasons = sorted(str(item) for item in result.get("exit_reasons", []) if str(item).strip())
+    if contract:
+        latest = store.recent_journal(limit=1, contract_symbol=contract)
+        if latest and str(latest[0].get("stage") or "") == JournalStage.EXIT_PROPOSED.value:
+            metadata = latest[0].get("metadata") if isinstance(latest[0].get("metadata"), Mapping) else {}
+            previous = metadata.get("exit_proposal") if isinstance(metadata.get("exit_proposal"), Mapping) else {}
+            previous_reasons = sorted(
+                str(item) for item in previous.get("exit_reasons", []) if str(item).strip()
+            )
+            if previous_reasons == current_reasons:
+                return False
+
     entry = JournalEntry(
         stage=JournalStage.EXIT_PROPOSED,
         environment=PlatformEnvironment.PAPER,
@@ -278,7 +293,7 @@ def _append_exit_proposal(
         option_type=_text(result.get("option_type")),
         quantity=_positive_int(result.get("quantity")),
         fill_price=_nonnegative(result.get("entry_price")),
-        hard_reasons=[str(item) for item in result.get("exit_reasons", [])],
+        hard_reasons=current_reasons,
         broker_order_id=_text(position.get("broker_order_id")),
         metadata={
             "exit_proposal": dict(result),
@@ -305,6 +320,7 @@ def _append_exit_proposal(
             },
         )
     )
+    return True
 
 
 def _parse_occ(value: str) -> dict[str, Any] | None:
