@@ -7,14 +7,19 @@ on:
       - "agent/src/api/trading_platform_routes.py"
       - "agent/src/options_market/personal.py"
       - "agent/src/options_market/personal_service.py"
+      - "agent/src/options_market/paper_execution.py"
+      - "agent/src/options_market/evidence_artifacts.py"
       - "agent/src/options_market/catalyst.py"
       - "agent/src/options_market/catalyst_store.py"
       - "agent/src/options_market/alpaca_news.py"
       - "agent/api_server.py"
       - "agent/tests/test_trading_platform_*.py"
       - "agent/tests/test_options_market_personal*.py"
+      - "agent/tests/test_options_market_execution_readiness.py"
+      - "agent/tests/test_options_market_evidence_artifacts.py"
       - "agent/tests/test_options_market_catalyst*.py"
       - "agent/tests/test_options_market_alpaca_news.py"
+      - "agent/tests/test_options_market_paper_rest.py"
       - "frontend/src/lib/tradingDesk.ts"
       - "frontend/src/pages/TradingDesk.tsx"
       - "frontend/src/router.tsx"
@@ -26,7 +31,19 @@ on:
       - "scripts/refresh_focused_options.py"
       - "scripts/refresh_catalysts.py"
       - "scripts/backfill_us_market_data.py"
+      - "scripts/build_historical_option_outcomes.py"
+      - "scripts/build_options_evidence.py"
       - "scripts/assess_account_risk.py"
+      - "scripts/run_personal_options_assistant.py"
+      - "scripts/run_continuous_options_analysis.py"
+      - "scripts/run_paper_option_lifecycle.py"
+      - "scripts/run_trading_platform_worker.py"
+      - "scripts/start_trading_platform.py"
+      - "scripts/trading_platform_preflight.py"
+      - "agent/requirements-market-calendar.txt"
+      - "requirements-market-calendar-lock.txt"
+      - "Dockerfile"
+      - "render.yaml"
       - ".github/workflows/trading-platform-ci.yml"
   workflow_dispatch:
 
@@ -43,15 +60,18 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install targeted dependencies
-        run: python -m pip install --upgrade pip pytest pydantic duckdb numpy pandas scipy requests "exchange_calendars>=4.13.2,<5"
-      - name: Compile platform modules, data/catalyst/risk CLIs and API assembler
         run: |
-          python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py agent/src/options_market/catalyst_store.py agent/src/options_market/alpaca_news.py
-          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/assess_account_risk.py
-      - name: Run platform, catalyst and personal-decision tests
+          python -m pip install --upgrade pip pytest pydantic duckdb numpy pandas scipy requests
+          python -m pip install --require-hashes --no-deps -r requirements-market-calendar-lock.txt
+          python -c "import exchange_calendars as xcals; assert 'XNYS' in xcals.get_calendar_names()"
+      - name: Compile platform modules and operational CLIs
+        run: |
+          python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py agent/src/options_market/paper_execution.py agent/src/options_market/personal_service.py agent/src/options_market/evidence_artifacts.py agent/src/options_market/catalyst_store.py agent/src/options_market/alpaca_news.py
+          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/build_historical_option_outcomes.py scripts/build_options_evidence.py scripts/assess_account_risk.py scripts/run_personal_options_assistant.py scripts/run_continuous_options_analysis.py scripts/run_paper_option_lifecycle.py scripts/run_trading_platform_worker.py scripts/start_trading_platform.py scripts/trading_platform_preflight.py
+      - name: Run platform, evidence, catalyst, paper and personal-decision tests
         env:
           PYTHONPATH: agent
-        run: pytest agent/tests/test_trading_platform_*.py agent/tests/test_options_market_personal.py agent/tests/test_options_market_personal_data_quality.py agent/tests/test_options_market_catalyst*.py agent/tests/test_options_market_alpaca_news.py -q
+        run: pytest agent/tests/test_trading_platform_*.py agent/tests/test_options_market_personal.py agent/tests/test_options_market_personal_data_quality.py agent/tests/test_options_market_execution_readiness.py agent/tests/test_options_market_evidence_artifacts.py agent/tests/test_options_market_catalyst*.py agent/tests/test_options_market_alpaca_news.py agent/tests/test_options_market_paper_rest.py -q
 
   frontend-build:
     runs-on: ubuntu-latest
@@ -68,3 +88,10 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build deployable platform image
+        run: docker build --tag vibe-trading-platform:ci .

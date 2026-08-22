@@ -3,7 +3,9 @@
 This wrapper keeps the continuous whole-market scanner reusable while adding
 personal-account evidence/risk gates and meaningful-change alerting. It remains
 broker-write free; an account provider may perform read-only account/position
-reads, but no order API is referenced here.
+reads, but no order API is referenced here. The result reports whether a
+candidate is eligible to enter the separate supervised paper lifecycle instead
+of the obsolete hard-coded ``execution: none`` marker.
 """
 
 from __future__ import annotations
@@ -105,11 +107,52 @@ class PersonalContinuousOptionsService:
             "personal": personal,
             "dashboard": dashboard,
             "alert": alert,
-            "execution": "none",
+            "execution": build_execution_readiness(personal),
         }
         if self.publish_cycle:
             self.publish_cycle(result)
         return result
+
+
+def build_execution_readiness(personal: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe eligibility for the separate supervised paper lifecycle.
+
+    This is intentionally not an order. It removes the misleading historical
+    ``execution: none`` field while retaining the approval boundary: a candidate
+    must first be ``TRADE_READY_RESEARCH`` and the paper runtime must still
+    re-check market clock, exact-contract quote freshness, OPRA, account risk and
+    paper profile before any broker mutation.
+    """
+    rows = personal.get("candidates") if isinstance(personal.get("candidates"), list) else []
+    ready = [
+        dict(row)
+        for row in rows
+        if isinstance(row, Mapping) and row.get("decision") == "TRADE_READY_RESEARCH"
+    ]
+    contracts = [
+        str(row.get("contract_symbol") or "").strip().upper()
+        for row in ready
+        if str(row.get("contract_symbol") or "").strip()
+    ]
+    if ready:
+        status = "PAPER_RUNTIME_CHECK_REQUIRED"
+        reasons: list[str] = []
+        next_action = "reprice_and_validate_with_supervised_paper_lifecycle"
+    else:
+        status = "BLOCKED_BY_RESEARCH_GATES"
+        reasons = ["no_TRADE_READY_RESEARCH_candidate"]
+        next_action = "continue_research_and_evidence_refresh"
+    return {
+        "mode": "supervised_paper",
+        "status": status,
+        "eligible_candidates": len(ready),
+        "eligible_contracts": contracts,
+        "automatic_submission": False,
+        "paper_submit_confirmation_required": True,
+        "runtime_revalidation_required": True,
+        "reasons": reasons,
+        "next_action": next_action,
+    }
 
 
 def _latest_candidates(market: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -140,4 +183,5 @@ __all__ = [
     "PersonalAccountState",
     "PersonalContinuousOptionsService",
     "PersonalEvidence",
+    "build_execution_readiness",
 ]

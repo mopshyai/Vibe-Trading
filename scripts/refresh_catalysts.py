@@ -28,6 +28,7 @@ from src.options_market.alpaca_news import AlpacaNewsConfig, AlpacaNewsReader  #
 from src.options_market.catalyst import score_catalysts  # noqa: E402
 from src.options_market.catalyst_store import CatalystEventStore  # noqa: E402
 from src.trading_platform import DataPlaneManifest  # noqa: E402
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 UTC = timezone.utc
 
@@ -65,7 +66,8 @@ def main() -> int:
 
     try:
         fetched_rows = AlpacaNewsReader(
-            config=AlpacaNewsConfig(lookback_hours=args.lookback_hours)
+            config=AlpacaNewsConfig(lookback_hours=args.lookback_hours),
+            alpaca_config=load_alpaca_runtime_config(),
         ).fetch(clean_symbols, now=now)
     except Exception as exc:  # noqa: BLE001 - stale store may still support a degraded score
         fetch_error = str(exc)

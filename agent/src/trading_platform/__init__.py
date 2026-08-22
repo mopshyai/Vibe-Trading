@@ -22,11 +22,21 @@ from .models import (
     SystemIdentity,
     TradingDeskSnapshot,
 )
+from .paper_lifecycle import (
+    PaperLifecycleConfig,
+    append_reconciled_order_status,
+    fetch_alpaca_market_clock,
+    fetch_alpaca_order,
+    fetch_current_option_quote,
+    run_paper_option_lifecycle,
+    sync_paper_order_lifecycle,
+)
 from .portfolio_risk import (
     AccountRiskConfig,
     assess_account_portfolio_risk,
     risk_summary_from_report,
 )
+from .preflight import run_platform_preflight
 from .service import TradingPlatformService
 from .store import TradingPlatformStore
 
@@ -45,6 +55,7 @@ __all__ = [
     "JournalStage",
     "MarketCalendarDependencyError",
     "OpportunityCard",
+    "PaperLifecycleConfig",
     "PlatformEnvironment",
     "PlatformEvent",
     "RiskSummary",
@@ -52,10 +63,17 @@ __all__ = [
     "TradingDeskSnapshot",
     "TradingPlatformService",
     "TradingPlatformStore",
+    "append_reconciled_order_status",
     "assess_account_portfolio_risk",
     "evaluate_data_freshness",
+    "fetch_alpaca_market_clock",
+    "fetch_alpaca_order",
+    "fetch_current_option_quote",
     "risk_summary_from_report",
+    "run_paper_option_lifecycle",
+    "run_platform_preflight",
     "stage_for_decision",
+    "sync_paper_order_lifecycle",
     "xnys_session_calendar",
     "xnys_trading_session",
 ]

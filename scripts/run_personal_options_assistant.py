@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Turn the continuous U.S. options shortlist into a personal research dashboard.
 
-This command is read-only. It can optionally read Alpaca account/position state,
-but it never calls an order endpoint. Missing EV/walk-forward evidence produces
+This command is broker-mutation free. It can read the configured Alpaca PAPER
+account/positions through the hosted REST reader and reports eligibility for the
+separate supervised paper lifecycle. Missing EV/walk-forward evidence produces
 WATCH/PASS rather than silently promoting a candidate to trade-ready.
 """
 
@@ -24,8 +25,10 @@ if str(AGENT) not in sys.path:
 
 from src.options_market.dashboard import build_alert_event, build_personal_dashboard  # noqa: E402
 from src.options_market.personal import build_personal_shortlist  # noqa: E402
+from src.options_market.personal_service import build_execution_readiness  # noqa: E402
 from src.options_market.regime import classify_market_regime  # noqa: E402
-from src.trading.connectors.alpaca import sdk as alpaca_sdk  # noqa: E402
+from src.trading_platform.paper_broker_read import fetch_paper_account_positions  # noqa: E402
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 _OCC = re.compile(r"^(?P<root>[A-Z0-9]{1,6})(?P<date>\d{6})(?P<type>[CP])(?P<strike>\d{8})$")
 
@@ -35,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-json", required=True, type=Path, help="Latest continuous-analysis JSON output")
     account = parser.add_mutually_exclusive_group(required=True)
     account.add_argument("--account-equity", type=float, help="Account equity used by the research risk gate")
-    account.add_argument("--alpaca-account", action="store_true", help="Read equity and open long-option positions from Alpaca")
+    account.add_argument("--alpaca-account", action="store_true", help="Read equity and open long-option positions from Alpaca PAPER")
     parser.add_argument("--positions-json", type=Path, help="Existing risk positions for the portfolio-risk gate")
     parser.add_argument(
         "--assume-no-open-risk",
@@ -91,7 +94,7 @@ def main() -> int:
         "personal": personal,
         "dashboard": dashboard,
         "alert": alert,
-        "execution": "none",
+        "execution": build_execution_readiness(personal),
     }
     rendered = json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False, default=str) + "\n"
     if args.output:
@@ -138,36 +141,46 @@ def _load_regime(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _alpaca_risk_state() -> tuple[float, list[dict[str, Any]]]:
-    account_payload = alpaca_sdk.get_account_snapshot()
-    account = account_payload.get("account") if isinstance(account_payload, Mapping) else None
+    broker = fetch_paper_account_positions(load_alpaca_runtime_config())
+    account = broker.get("account") if isinstance(broker.get("account"), Mapping) else None
     if not isinstance(account, Mapping):
-        raise RuntimeError("Alpaca account snapshot missing account data")
+        raise RuntimeError("Alpaca paper account snapshot missing account data")
+    if bool(account.get("trading_blocked")) or bool(account.get("account_blocked")) or bool(account.get("trade_suspended_by_user")):
+        raise RuntimeError("Alpaca paper account is trading-blocked")
     equity = _positive(account.get("equity") or account.get("portfolio_value"))
     if equity is None:
-        raise RuntimeError("Alpaca account snapshot missing positive equity")
+        raise RuntimeError("Alpaca paper account snapshot missing positive equity")
 
-    positions_payload = alpaca_sdk.get_positions()
-    rows = positions_payload.get("positions") if isinstance(positions_payload, Mapping) else None
+    rows = broker.get("positions") if isinstance(broker, Mapping) else None
     risk_positions: list[dict[str, Any]] = []
     for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or str(row.get("asset_class") or "").lower() != "option":
             continue
         symbol = str(row.get("symbol") or "").strip().upper()
         match = _OCC.match(symbol)
         if match is None:
             continue
         side = str(row.get("side") or "").lower()
-        qty = _positive(row.get("quantity"))
-        avg = _positive(row.get("average_cost"))
-        if side not in {"long", "buy", ""} or qty is None or avg is None:
+        qty = _positive(row.get("qty") or row.get("quantity"))
+        basis = _positive(row.get("cost_basis"))
+        avg = _positive(row.get("avg_entry_price") or row.get("average_cost"))
+        if side not in {"long", "buy", ""} or qty is None:
+            continue
+        risk_usd = basis if basis is not None else (avg * 100.0 * qty if avg is not None else None)
+        if risk_usd is None:
             continue
         risk_positions.append(
             {
                 "symbol": match.group("root"),
                 "underlying": match.group("root"),
+                "contract_symbol": symbol,
+                "asset_class": "option",
+                "option_type": "call" if match.group("type") == "C" else "put",
                 "expiration": _occ_expiration(match.group("date")),
                 "quantity": qty,
-                "risk_usd": avg * 100.0,
+                "risk_usd": risk_usd,
+                "premium_risk_usd": risk_usd,
+                "cost_basis": risk_usd,
             }
         )
     return equity, risk_positions

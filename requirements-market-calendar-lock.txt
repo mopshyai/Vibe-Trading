@@ -1,0 +1,19 @@
+# Hash-pinned trading-platform calendar supplement.
+#
+# Installed with --no-deps after requirements-lock.txt. The main lock already
+# supplies compatible numpy, pandas and tzdata; the four packages below are the
+# missing exchange_calendars runtime set. Hashes are for the exact PyPI 2026
+# releases named below.
+
+exchange-calendars==4.13.2 \
+    --hash=sha256:fc5a2ad0d61b5c3a6539a3061cd4cbb55c59f4a903455cec7926e4b798919996 \
+    --hash=sha256:a9459425dd64142cd54fbc639847403c7e0c33d60fbc326c94fc1d6bd127f002
+korean-lunar-calendar==0.4.0 \
+    --hash=sha256:c042e20de0bb702add6bec8d0f6da1ea8d3b170838e63846f70420cf341fe4e7 \
+    --hash=sha256:be56f27bc0594fdbbdf7bbe00f504a9f929a31e311bd7d9bb93561b645afade7
+pyluach==2.3.0 \
+    --hash=sha256:4497b731aef59508b079dbf5f00bc5bf4329ac45090a6cd37b5a83756f0e69ab \
+    --hash=sha256:ec6e30669d1df50c9ca160486da44a8195bb4c7a5d3d533990d0c5b03accd281
+toolz==1.1.0 \
+    --hash=sha256:15ccc861ac51c53696de0a5d6d4607f99c210739caf987b5d2054f3efed429d8 \
+    --hash=sha256:27a5c770d068c110d9ed9323f24f1543e83b2f300a687b7891c1a6d56b697b5b

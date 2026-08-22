@@ -33,6 +33,7 @@ from src.options_market.alpaca_current import (  # noqa: E402
     AlpacaCurrentOptionsReader,
 )
 from src.trading_platform import DataPlaneManifest  # noqa: E402
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 UTC = timezone.utc
 
@@ -57,12 +58,13 @@ def main() -> int:
         raise ValueError("top-n must be between 1 and 200")
     focus = _focus_rows(args.focus_json)[: args.top_n]
     reader = AlpacaCurrentOptionsReader(
+        alpaca_config=load_alpaca_runtime_config(),
         config=AlpacaCurrentOptionsConfig(
             min_dte=args.min_dte,
             max_dte=args.max_dte,
             option_feed=args.feed,
             max_results=args.max_results_per_symbol,
-        )
+        ),
     )
     observed_at = datetime.now(UTC)
     options: dict[str, list[dict[str, Any]]] = {}

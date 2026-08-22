@@ -19,7 +19,14 @@ class FreshnessPolicy(BaseModel):
 
 DEFAULT_FRESHNESS_POLICIES: dict[str, FreshnessPolicy] = {
     "equity_universe": FreshnessPolicy(max_age_seconds=86_400, blocking=True),
+    # Focused underlying quotes used for current option repricing.
     "equity_market": FreshnessPolicy(max_age_seconds=120, blocking=True),
+    # Whole-market 1D bars used by the cross-sectional chart screen. The worker
+    # refreshes these once per market date; 30h allows normal overnight/session
+    # boundaries. The refresh CLI separately rejects source bars whose actual
+    # event timestamp is more than five calendar days old, covering weekends and
+    # exchange holidays without treating ancient data as current.
+    "equity_daily_bars": FreshnessPolicy(max_age_seconds=30 * 3600, blocking=True),
     "options_market": FreshnessPolicy(max_age_seconds=60, blocking=True),
     "market_calendar": FreshnessPolicy(max_age_seconds=86_400, blocking=True),
     "catalysts": FreshnessPolicy(max_age_seconds=900, blocking=False),
