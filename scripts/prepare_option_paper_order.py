@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         help="Explicit caller assertion that the regular options session is open",
     )
     parser.add_argument("--max-premium-risk", type=float, default=500.0)
+    parser.add_argument(
+        "--max-contracts",
+        type=int,
+        default=1,
+        help="Independent hard cap on contracts; default 1",
+    )
     return parser.parse_args()
 
 
@@ -65,7 +71,7 @@ def main() -> int:
 
     cfg = PaperExecutionConfig(
         dry_run=not args.submit_paper,
-        max_contracts=max(1, args.quantity),
+        max_contracts=args.max_contracts,
         max_premium_risk_usd=args.max_premium_risk,
     )
     result = submit_paper_option_order(
