@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import importlib.util
 import json
-
-from scripts.refresh_paper_exit_state import _fill_context, _risk_exit_signal
-from scripts.run_trading_platform_lifecycle_worker import _should_checkpoint_attribution
+from pathlib import Path
+from types import ModuleType
 
 UTC = timezone.utc
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_script(name: str) -> ModuleType:
+    path = ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"test_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load script module {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_exit_state = _load_script("refresh_paper_exit_state")
+_lifecycle = _load_script("run_trading_platform_lifecycle_worker")
+_risk_exit_signal = _exit_state._risk_exit_signal
+_fill_context = _exit_state._fill_context
+_should_checkpoint_attribution = _lifecycle._should_checkpoint_attribution
 
 
 def test_concentration_block_does_not_force_liquidation() -> None:
