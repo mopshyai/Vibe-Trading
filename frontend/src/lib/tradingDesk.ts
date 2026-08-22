@@ -40,6 +40,12 @@ export interface TradingDeskOpportunity {
   watch_reasons: string[];
 }
 
+export interface RiskBucket {
+  key: string;
+  risk_usd: number;
+  risk_pct: number;
+}
+
 export interface TradingDeskRiskSummary {
   account_equity_usd?: number | null;
   open_premium_risk_usd?: number | null;
@@ -51,21 +57,23 @@ export interface TradingDeskRiskSummary {
   trading_blocked: boolean;
   blocking_reasons: string[];
   greeks: {
-    complete?: boolean;
-    positions_with_greeks?: number;
-    option_positions?: number;
-    net_delta_shares?: number | null;
-    net_dollar_delta_usd?: number | null;
-    net_gamma?: number | null;
-    net_theta_per_day?: number | null;
-    net_vega?: number | null;
+    delta_shares?: number | null;
+    dollar_delta_usd?: number | null;
+    gamma_scaled?: number | null;
+    theta_scaled_per_day?: number | null;
+    vega_scaled?: number | null;
+    dollar_delta_pct_equity?: number | null;
+    coverage?: Record<string, { known: number; positions: number }>;
     [key: string]: unknown;
   };
   concentration: {
-    underlying?: Array<{ key?: string; value?: string; risk_usd: number; risk_pct: number }>;
-    sector?: Array<{ key?: string; value?: string; risk_usd: number; risk_pct: number }>;
-    expiry?: Array<{ key?: string; value?: string; risk_usd: number; risk_pct: number }>;
+    underlying?: RiskBucket[];
+    sector?: RiskBucket[];
+    expiry?: RiskBucket[];
     correlation?: {
+      threshold?: number;
+      underlyings_with_history?: number;
+      aligned_observations?: number;
       clusters?: Array<{ underlyings: string[]; risk_usd: number; risk_pct: number }>;
       pairs?: Array<{ left: string; right: string; correlation: number }>;
       [key: string]: unknown;
