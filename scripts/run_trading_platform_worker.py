@@ -29,7 +29,6 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,7 +67,10 @@ def main() -> int:
     if args.command_timeout < 10:
         raise ValueError("command-timeout must be at least 10 seconds")
 
-    data_dir = args.data_dir or Path(os.environ.get("TRADING_PLATFORM_DATA_DIR") or (get_runtime_root() / "trading-platform"))
+    data_dir = args.data_dir or Path(
+        os.environ.get("TRADING_PLATFORM_DATA_DIR")
+        or (get_runtime_root() / "trading-platform")
+    )
     data_dir.mkdir(parents=True, exist_ok=True)
     option_feed = args.option_feed or os.environ.get("TRADING_PLATFORM_OPTION_FEED", "opra").strip().lower()
     if option_feed not in {"opra", "indicative"}:
@@ -159,8 +161,9 @@ def run_worker_cycle(
     if force_full:
         analysis_cmd.append("--force-full")
     statuses["analysis_pass_1"] = _run(analysis_cmd, timeout=command_timeout)
+    pass_one_ok = statuses["analysis_pass_1"].get("status") == "ok"
 
-    if paths["analysis"].exists():
+    if pass_one_ok and paths["analysis"].exists():
         statuses["options_refresh"] = _run(
             [
                 "refresh_focused_options.py",
@@ -183,9 +186,10 @@ def run_worker_cycle(
         )
         statuses["analysis_pass_2"] = _run(analysis_cmd, timeout=command_timeout)
     else:
-        statuses["options_refresh"] = {"status": "skipped", "reason": "analysis_output_unavailable"}
-        statuses["catalyst_refresh"] = {"status": "skipped", "reason": "analysis_output_unavailable"}
-        statuses["analysis_pass_2"] = {"status": "skipped", "reason": "analysis_output_unavailable"}
+        statuses["options_refresh"] = {"status": "skipped", "reason": "current_analysis_pass_failed"}
+        statuses["catalyst_refresh"] = {"status": "skipped", "reason": "current_analysis_pass_failed"}
+        statuses["analysis_pass_2"] = {"status": "skipped", "reason": "current_analysis_pass_failed"}
+    current_analysis_ok = statuses["analysis_pass_2"].get("status") == "ok"
 
     statuses["account_risk"] = _run(
         [
@@ -197,35 +201,12 @@ def run_worker_cycle(
         timeout=command_timeout,
         acceptable_codes=(0, 2),
     )
-    if not paths["risk_summary"].exists():
-        _atomic_json(
-            paths["risk_summary"],
-            {
-                "account_equity_usd": None,
-                "open_premium_risk_usd": None,
-                "open_premium_risk_pct": None,
-                "daily_realized_pnl_usd": None,
-                "weekly_realized_pnl_usd": None,
-                "max_drawdown_pct": None,
-                "positions": 0,
-                "trading_blocked": True,
-                "blocking_reasons": ["account_risk_unavailable"],
-                "greeks": {},
-                "concentration": {},
-            },
-        )
-    if not paths["risk"].exists():
-        _atomic_json(
-            paths["risk"],
-            {
-                "approved": False,
-                "trading_blocked": True,
-                "decision": "ACCOUNT_RISK_BLOCKED",
-                "blocking_reasons": ["account_risk_unavailable"],
-            },
-        )
+    current_risk_ok = statuses["account_risk"].get("status") == "ok"
+    if not current_risk_ok:
+        _atomic_json(paths["risk_summary"], _blocked_risk_summary("account_risk_unavailable"))
+        _atomic_json(paths["risk"], _blocked_risk("account_risk_unavailable"))
 
-    if paths["analysis"].exists():
+    if current_analysis_ok:
         personal_cmd = [
             "run_personal_options_assistant.py",
             "--analysis-json", str(paths["analysis"]),
@@ -240,9 +221,9 @@ def run_worker_cycle(
             personal_cmd += ["--previous-dashboard", str(paths["dashboard"])]
         statuses["personal"] = _run(personal_cmd, timeout=command_timeout)
     else:
-        statuses["personal"] = {"status": "skipped", "reason": "analysis_output_unavailable"}
+        statuses["personal"] = {"status": "skipped", "reason": "current_analysis_unavailable"}
 
-    if not paths["personal_cycle"].exists():
+    if statuses["personal"].get("status") != "ok":
         _atomic_json(paths["personal_cycle"], _blocked_cycle(paths["analysis"], "personal_runtime_unavailable"))
     else:
         cycle = _json(paths["personal_cycle"])
@@ -265,7 +246,8 @@ def run_worker_cycle(
     platform_snapshot_published = statuses["publish"].get("status") == "ok"
 
     proposal_bundle = _build_execution_bundle(paths["personal_cycle"], paths["risk"])
-    if proposal_bundle is not None:
+    proposal_current = proposal_bundle is not None
+    if proposal_current:
         _atomic_json(paths["execution_input"], proposal_bundle)
         statuses["paper_proposal"] = _run(
             [
@@ -279,6 +261,10 @@ def run_worker_cycle(
             acceptable_codes=(0, 2),
         )
     else:
+        try:
+            paths["execution_input"].unlink(missing_ok=True)
+        except OSError:
+            pass
         _atomic_json(
             paths["paper_proposal"],
             {
@@ -289,7 +275,10 @@ def run_worker_cycle(
                 "observed_at": now.isoformat(),
             },
         )
-        statuses["paper_proposal"] = {"status": "skipped", "reason": "no_trade_ready_candidate_or_account_risk_blocked"}
+        statuses["paper_proposal"] = {
+            "status": "skipped",
+            "reason": "no_trade_ready_candidate_or_account_risk_blocked",
+        }
 
     statuses["paper_reconcile"] = _run(
         [
@@ -310,9 +299,13 @@ def run_worker_cycle(
     contract = _proposal_contract(paths["paper_proposal"])
     if contract:
         preflight_cmd += ["--contract", contract]
-    if paths["execution_input"].exists():
+    if proposal_current and paths["execution_input"].exists():
         preflight_cmd += ["--execution-input-json", str(paths["execution_input"])]
-    statuses["preflight"] = _run(preflight_cmd, timeout=command_timeout, acceptable_codes=(0, 2))
+    statuses["preflight"] = _run(
+        preflight_cmd,
+        timeout=command_timeout,
+        acceptable_codes=(0, 2),
+    )
 
     return {
         "schema_version": 1,
@@ -377,6 +370,31 @@ def _build_execution_bundle(personal_path: Path, risk_path: Path) -> dict[str, A
     return None
 
 
+def _blocked_risk_summary(reason: str) -> dict[str, Any]:
+    return {
+        "account_equity_usd": None,
+        "open_premium_risk_usd": None,
+        "open_premium_risk_pct": None,
+        "daily_realized_pnl_usd": None,
+        "weekly_realized_pnl_usd": None,
+        "max_drawdown_pct": None,
+        "positions": 0,
+        "trading_blocked": True,
+        "blocking_reasons": [reason],
+        "greeks": {},
+        "concentration": {},
+    }
+
+
+def _blocked_risk(reason: str) -> dict[str, Any]:
+    return {
+        "approved": False,
+        "trading_blocked": True,
+        "decision": "ACCOUNT_RISK_BLOCKED",
+        "blocking_reasons": [reason],
+    }
+
+
 def _blocked_cycle(analysis_path: Path, reason: str) -> dict[str, Any]:
     market = _json(analysis_path) if analysis_path.exists() else {}
     return {
@@ -430,7 +448,12 @@ def _run(
             env=os.environ.copy(),
         )
     except subprocess.TimeoutExpired as exc:
-        return {"status": "error", "reason": "timeout", "seconds": timeout, "stderr": _tail(exc.stderr)}
+        return {
+            "status": "error",
+            "reason": "timeout",
+            "seconds": timeout,
+            "stderr": _tail(exc.stderr),
+        }
     except OSError as exc:
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
     status = "ok" if completed.returncode in acceptable_codes else "error"
