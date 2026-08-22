@@ -1,10 +1,12 @@
-"""Read-only options-chain tool backed by the shared Yahoo Finance client.
+"""Read-only US options-chain research backed by the shared Yahoo client.
 
-Surfaces the calls/puts ladder for a US-listed underlying (strike, bid/ask,
-last price, volume, open interest, implied volatility, and the in/out-of-money
-flag) for a single expiration. All HTTP routes through
-:func:`backtest.loaders.yahoo_client.get_options`, which throttles per host and
-reuses one session, so the agent never hits Yahoo un-spaced.
+``chain`` mode preserves the normalized calls/puts ladder. ``opportunities``
+mode ranks defined-risk long calls and puts against a configurable modeled
+profit target (default +300%, i.e. a 4x option-premium target). All HTTP routes
+through :func:`backtest.loaders.yahoo_client.get_options`.
+
+The opportunity ranking is research-only: it does not place orders and its score
+is not a probability, expected return, or guarantee.
 """
 
 from __future__ import annotations
@@ -14,6 +16,10 @@ from typing import Any, Dict, List, Optional
 
 from backtest.loaders import yahoo_client
 from src.agent.tools import BaseTool
+from src.tools._options_opportunity import (
+    scan_opportunities,
+    validate_explicit_expiration,
+)
 
 # Upper bound on contracts emitted per side so a deep chain cannot blow up the
 # tool payload handed back to the model.
@@ -35,15 +41,17 @@ _CONTRACT_FIELDS = (
 
 
 class OptionsChainTool(BaseTool):
-    """Fetch a US equity option chain (calls + puts) with greeks-grade fields."""
+    """Fetch a US equity option chain or rank asymmetric option candidates."""
 
     name = "get_options_chain"
     description = (
-        "Fetch the US-listed options chain (calls and puts) for one expiration "
-        "via Yahoo Finance: per-contract strike, bid/ask, last price, volume, "
-        "open interest, implied volatility, and in-the-money flag, plus the list "
-        "of available expirations (epoch seconds). Read-only US options data. "
-        'Example: get_options_chain(ticker="AAPL").'
+        "Read-only US options research via Yahoo Finance. mode='chain' (default) "
+        "returns calls/puts for one expiration. mode='opportunities' scans liquid "
+        "long calls/puts across nearby expirations and ranks them against a "
+        "configurable modeled profit target; the default +300% target means the "
+        "option premium must reach 4x entry. Ranking is a scenario screen, not a "
+        "probability estimate, trade instruction, or guaranteed return. "
+        'Example: get_options_chain(ticker="AAPL", mode="opportunities").'
     )
     parameters = {
         "type": "object",
@@ -52,15 +60,95 @@ class OptionsChainTool(BaseTool):
                 "type": "string",
                 "description": (
                     "US underlying symbol, e.g. 'AAPL' or 'AAPL.US' (the .US "
-                    "suffix is stripped). Required."
+                    "suffix is stripped by the Yahoo client). Required."
                 ),
             },
             "expiration": {
                 "type": "integer",
                 "description": (
-                    "Optional expiration as Unix epoch seconds (one of the "
-                    "values from the returned expirations list). Omit for the "
-                    "nearest expiration."
+                    "Optional expiration as Unix epoch seconds. In chain mode, "
+                    "omit for the nearest expiration. In opportunities mode, "
+                    "omit to scan qualifying expirations in the DTE window."
+                ),
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["chain", "opportunities"],
+                "default": "chain",
+                "description": (
+                    "chain returns the normalized option chain; opportunities "
+                    "ranks defined-risk long calls/puts for asymmetric upside."
+                ),
+            },
+            "target_profit_pct": {
+                "type": "number",
+                "default": 300,
+                "description": (
+                    "Opportunities mode only. Modeled profit target; 300 means "
+                    "+300% profit and therefore a 4x target option premium."
+                ),
+            },
+            "min_dte": {
+                "type": "integer",
+                "default": 7,
+                "description": (
+                    "Opportunities mode only. Minimum days to expiration. "
+                    "0DTE is intentionally excluded by default."
+                ),
+            },
+            "max_dte": {
+                "type": "integer",
+                "default": 60,
+                "description": "Opportunities mode only. Maximum days to expiration.",
+            },
+            "max_expirations": {
+                "type": "integer",
+                "default": 3,
+                "description": (
+                    "Opportunities mode only. Maximum qualifying expirations "
+                    "to scan, capped at 6."
+                ),
+            },
+            "min_open_interest": {
+                "type": "integer",
+                "default": 100,
+                "description": "Opportunities mode only. Minimum open interest.",
+            },
+            "min_volume": {
+                "type": "integer",
+                "default": 20,
+                "description": "Opportunities mode only. Minimum contract volume.",
+            },
+            "max_spread_pct": {
+                "type": "number",
+                "default": 20,
+                "description": (
+                    "Opportunities mode only. Maximum bid/ask spread as a "
+                    "percentage of midpoint."
+                ),
+            },
+            "max_contract_cost_usd": {
+                "type": "number",
+                "default": 1000,
+                "description": (
+                    "Opportunities mode only. Maximum debit for one 100-share "
+                    "long option contract."
+                ),
+            },
+            "max_results": {
+                "type": "integer",
+                "default": 10,
+                "description": (
+                    "Opportunities mode only. Maximum ranked candidates "
+                    "returned, capped at 25."
+                ),
+            },
+            "include_itm": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Opportunities mode only. Include in-the-money contracts; "
+                    "false by default."
                 ),
             },
         },
@@ -68,73 +156,37 @@ class OptionsChainTool(BaseTool):
     }
 
     def execute(self, **kwargs: Any) -> str:
-        """Return a JSON-string envelope with the calls/puts chain.
-
-        Args:
-            **kwargs: ``ticker`` (str, required) and optional ``expiration``
-                (int epoch seconds).
-
-        Returns:
-            A JSON string. On success:
-            ``{"ok": true, "market": "us", "source": "yahoo", "data": {...}}``
-            where ``data`` carries ``ticker``, ``expirations``, ``expiration``,
-            ``calls``, ``puts``, and per-side counts. On failure:
-            ``{"ok": false, "error": str}``.
-        """
+        """Return a chain or a ranked-opportunity JSON envelope."""
         ticker = str(kwargs.get("ticker") or "").strip()
         if not ticker:
             return _error("ticker is required")
+
+        mode = str(kwargs.get("mode") or "chain").strip().lower()
+        if mode not in {"chain", "opportunities"}:
+            return _error("mode must be 'chain' or 'opportunities'")
 
         expiration = kwargs.get("expiration")
         normalized_expiration = _coerce_expiration(expiration)
         if expiration is not None and normalized_expiration is None:
             return _error("expiration must be Unix epoch seconds (integer)")
 
+        if mode == "opportunities":
+            return scan_opportunities(ticker, normalized_expiration, kwargs)
+
         try:
             result = yahoo_client.get_options(
-                ticker, expiration=normalized_expiration
+                ticker,
+                expiration=normalized_expiration,
             )
         except Exception as exc:  # noqa: BLE001 - surface as error envelope
             return _error(f"yahoo options request failed: {exc}")
 
-        # When the caller explicitly requested an expiration, validate that
-        # Yahoo returned a chain for that exact expiration.  A non-matching
-        # expiration returns an empty or stale chain silently, which is
-        # misleading.  The tool owns the guarantee that its envelope
-        # corresponds to the caller's requested expiration; the Yahoo client
-        # only guarantees raw data.
-        if normalized_expiration is not None:
-            dates = result.get("expirationDates")
-            if not isinstance(dates, list):
-                return _error(
-                    "malformed Yahoo response: expirationDates is not a list"
-                )
-            if normalized_expiration not in dates:
-                return _error(
-                    f"expiration {normalized_expiration} is not among the "
-                    f"available dates; available: {dates[:8]}"
-                    f"{'...' if len(dates) > 8 else ''}"
-                )
-            options = result.get("options") or []
-            if not isinstance(options, list) or not options:
-                # The date IS listed (checked above), so this is Yahoo
-                # returning no chain block for it — not an unlisted ticker.
-                return _error(
-                    f"no option chain returned for expiration "
-                    f"{normalized_expiration} although Yahoo lists that date; "
-                    f"retry, or pick another expiration from: {dates[:8]}"
-                )
-            block = options[0]
-            if not isinstance(block, dict):
-                return _error(
-                    "malformed Yahoo response: options block is not a dict"
-                )
-            block_date = block.get("expirationDate")
-            if block_date != normalized_expiration:
-                return _error(
-                    f"expiration {normalized_expiration} did not match the "
-                    f"returned chain (block expiration is {block_date})"
-                )
+        validation_error = validate_explicit_expiration(
+            result,
+            normalized_expiration,
+        )
+        if validation_error is not None:
+            return _error(validation_error)
 
         return _success(ticker, result)
 
@@ -152,9 +204,11 @@ def _coerce_expiration(value: Any) -> Optional[int]:
 
 
 def _success(ticker: str, result: Dict[str, Any]) -> str:
-    """Build the success envelope from a quote-chain ``result[0]`` mapping."""
+    """Build the success envelope from a quote-chain result mapping."""
     expirations = [
-        epoch for epoch in (result.get("expirationDates") or []) if epoch is not None
+        epoch
+        for epoch in (result.get("expirationDates") or [])
+        if epoch is not None
     ]
     options = result.get("options") or []
     block = options[0] if options and isinstance(options[0], dict) else {}
@@ -172,7 +226,12 @@ def _success(ticker: str, result: Dict[str, Any]) -> str:
         "puts": puts,
     }
     return json.dumps(
-        {"ok": True, "market": "us", "source": "yahoo", "data": data},
+        {
+            "ok": True,
+            "market": "us",
+            "source": "yahoo",
+            "data": data,
+        },
         ensure_ascii=False,
     )
 
@@ -186,11 +245,17 @@ def _contracts(raw: Any) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         rows.append(
-            {our_key: entry.get(yahoo_key) for yahoo_key, our_key in _CONTRACT_FIELDS}
+            {
+                our_key: entry.get(yahoo_key)
+                for yahoo_key, our_key in _CONTRACT_FIELDS
+            }
         )
     return rows
 
 
 def _error(message: str) -> str:
     """Render a failure envelope as a JSON string."""
-    return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
+    return json.dumps(
+        {"ok": False, "error": message},
+        ensure_ascii=False,
+    )
