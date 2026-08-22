@@ -9,12 +9,14 @@ from .chart_screen import (
 )
 from .outcomes import OutcomeConfig, calibrate_score_buckets, label_long_option_path
 from .pipeline import OptionsMarketPipelineConfig, combine_rankings
+from .store import OptionsResearchStore
 from .universe import USListing, fetch_us_listed_universe, parse_symbol_directory
 
 __all__ = [
     "ChartScreenConfig",
     "ChartSnapshot",
     "OptionsMarketPipelineConfig",
+    "OptionsResearchStore",
     "OutcomeConfig",
     "USListing",
     "calibrate_score_buckets",
