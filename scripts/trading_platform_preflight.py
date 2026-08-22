@@ -16,6 +16,7 @@ if str(AGENT) not in sys.path:
 
 from src.config.paths import get_runtime_root  # noqa: E402
 from src.trading_platform.preflight import run_platform_preflight  # noqa: E402
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +37,7 @@ def main() -> int:
         store_path=store_path,
         execution_input=payload,
         option_contract=args.contract,
+        alpaca_config=load_alpaca_runtime_config(),
         max_quote_age_seconds=args.max_quote_age_seconds,
     )
     rendered = json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False, default=str) + "\n"
