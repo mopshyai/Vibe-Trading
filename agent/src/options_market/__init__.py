@@ -1,5 +1,6 @@
 """Institutional-style U.S. options market research pipeline."""
 
+from .alpaca_current import AlpacaCurrentOptionsConfig, AlpacaCurrentOptionsReader
 from .catalyst import (
     CatalystEvent,
     CatalystScoreConfig,
@@ -25,6 +26,7 @@ from .continuous import (
     plan_analysis_cycle,
     weekday_regular_session,
 )
+from .dashboard import build_alert_event, build_personal_dashboard
 from .databento_adapter import (
     DatabentoHistoricalAdapter,
     DatabentoHistoricalConfig,
@@ -42,13 +44,21 @@ from .paper_execution import (
     build_paper_option_order,
     submit_paper_option_order,
 )
+from .payoff import PayoffPolicyConfig, evaluate_payoff_targets
+from .personal import PersonalDecisionConfig, build_personal_shortlist, evaluate_personal_candidate
+from .personal_service import PersonalAccountState, PersonalContinuousOptionsService, PersonalEvidence
 from .pipeline import OptionsMarketPipelineConfig, combine_rankings
+from .regime import RegimeConfig, classify_market_regime, regime_direction_fit
+from .replay import ReplayConfig, label_replay_candidates, replay_many, replay_selection_at
 from .risk import PortfolioRiskConfig, assess_portfolio_risk
 from .store import OptionsResearchStore
 from .universe import USListing, fetch_us_listed_universe, parse_symbol_directory
+from .volatility import OptionQualityConfig, assess_option_quality
 from .walkforward import WalkForwardConfig, evaluate_walk_forward
 
 __all__ = [
+    "AlpacaCurrentOptionsConfig",
+    "AlpacaCurrentOptionsReader",
     "AnalysisPlan",
     "AtomicAnalysisStateStore",
     "CatalystEvent",
@@ -63,30 +73,49 @@ __all__ = [
     "ExpectedValueConfig",
     "MarketPhase",
     "OSIContract",
+    "OptionQualityConfig",
     "OptionsMarketPipelineConfig",
     "OptionsResearchStore",
     "OutcomeConfig",
     "PaperExecutionConfig",
+    "PayoffPolicyConfig",
+    "PersonalAccountState",
+    "PersonalContinuousOptionsService",
+    "PersonalDecisionConfig",
+    "PersonalEvidence",
     "PortfolioRiskConfig",
+    "RegimeConfig",
+    "ReplayConfig",
     "TradingSession",
     "USListing",
     "WalkForwardConfig",
+    "assess_option_quality",
     "assess_portfolio_risk",
+    "build_alert_event",
     "build_paper_option_order",
+    "build_personal_dashboard",
+    "build_personal_shortlist",
     "calibrate_score_buckets",
     "candidate_ev_gate",
     "choose_score_threshold",
     "classify_market_phase",
+    "classify_market_regime",
     "combine_rankings",
     "compute_chart_snapshot",
     "directional_catalyst_scores",
     "empirical_expected_value",
+    "evaluate_payoff_targets",
+    "evaluate_personal_candidate",
     "evaluate_walk_forward",
     "fetch_us_listed_universe",
     "label_long_option_path",
+    "label_replay_candidates",
     "parse_symbol_directory",
     "plan_analysis_cycle",
     "rank_chart_snapshots",
+    "regime_direction_fit",
+    "replay_many",
+    "replay_selection_at",
     "scan_market_frames",
     "score_catalysts",
     "submit_paper_option_order",
