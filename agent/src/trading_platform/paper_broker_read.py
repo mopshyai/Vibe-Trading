@@ -46,11 +46,20 @@ def fetch_paper_positions(
     for raw in payload:
         if not isinstance(raw, Mapping):
             continue
+        raw_asset_class = str(raw.get("asset_class") or "").strip().lower()
+        asset_class = (
+            "option"
+            if raw_asset_class in {"option", "us_option"}
+            else "equity"
+            if raw_asset_class in {"equity", "us_equity"}
+            else raw_asset_class
+        )
         rows.append(
             {
                 "symbol": raw.get("symbol"),
                 "asset_id": raw.get("asset_id"),
-                "asset_class": raw.get("asset_class"),
+                "asset_class": asset_class,
+                "broker_asset_class": raw_asset_class or None,
                 "exchange": raw.get("exchange"),
                 "qty": raw.get("qty"),
                 "side": raw.get("side"),
