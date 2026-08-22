@@ -21,6 +21,7 @@ export function Layout() {
   // matches both "/" and legacy "/agent" deep links.
   const NAV = [
     { to: "/", icon: Bot, label: t('layout.agent') },
+    { to: "/trading", icon: CandlestickChart, label: t('layout.tradingDesk', { defaultValue: 'Trading Desk' }) },
     { to: "/runtime", icon: Activity, label: t('layout.runtime') },
     { to: "/scheduled", icon: CalendarClock, label: t('layout.scheduled') },
     { to: "/reports", icon: FileText, label: t('layout.reports') },
