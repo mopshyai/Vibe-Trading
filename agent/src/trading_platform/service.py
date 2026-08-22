@@ -51,19 +51,28 @@ class TradingPlatformService:
         dashboard = _mapping(cycle.get("dashboard"))
         state = _mapping(market.get("state"))
         plan = _mapping(market.get("plan"))
+        risk_summary = risk or RiskSummary()
+        funnel = _funnel(dashboard.get("funnel"))
+        decision = _decision(dashboard.get("decision") or personal.get("decision"))
+        headline = str(dashboard.get("headline") or "Trading research snapshot")
+
+        if risk_summary.trading_blocked:
+            decision = DeskDecision.NO_TRADE
+            funnel = funnel.model_copy(update={"trade_ready": 0})
+            headline = "NO TRADE — account risk gate blocked additional exposure"
 
         snapshot = TradingDeskSnapshot(
             environment=self.environment,
             execution_mode=_execution_mode(self.environment),
-            decision=_decision(dashboard.get("decision") or personal.get("decision")),
-            headline=str(dashboard.get("headline") or "Trading research snapshot"),
+            decision=decision,
+            headline=headline,
             system=self.system,
             market_phase=str(plan.get("phase") or state.get("latest_phase") or "unknown"),
             market_regime=str(dashboard.get("market_regime") or "unknown"),
             market_regime_confidence=_bounded01(dashboard.get("market_regime_confidence")),
-            funnel=_funnel(dashboard.get("funnel")),
+            funnel=funnel,
             opportunities=_opportunities(dashboard.get("cards")),
-            risk=risk or RiskSummary(),
+            risk=risk_summary,
             data_quality=data_quality or DataQualitySummary(),
             source_cycle=_nonnegative_int(state.get("cycle")),
             warnings=_warnings(cycle, dashboard),
@@ -82,23 +91,20 @@ class TradingPlatformService:
                     "opportunity_count": len(snapshot.opportunities),
                     "data_healthy": snapshot.data_quality.healthy,
                     "execution_mode": snapshot.execution_mode.value,
+                    "account_risk_blocked": snapshot.risk.trading_blocked,
+                    "account_risk_reasons": list(snapshot.risk.blocking_reasons),
                 },
             )
         )
 
         journal_rows = personal.get("journal_candidates")
         if not isinstance(journal_rows, list):
-            # Backward-compatible fallback for cycles created before the full
-            # evaluated-candidate journal payload existed.
             journal_rows = personal.get("candidates") if isinstance(personal.get("candidates"), list) else []
         journal_count = 0
         for raw in journal_rows:
             if not isinstance(raw, Mapping):
                 continue
-            entry = _journal_entry(
-                raw,
-                snapshot=snapshot,
-            )
+            entry = _journal_entry(raw, snapshot=snapshot)
             if entry is None:
                 continue
             self.store.append_journal_entry(entry)
@@ -109,10 +115,7 @@ class TradingPlatformService:
                     event_type="candidate_batch_journaled",
                     environment=self.environment,
                     system=self.system,
-                    payload={
-                        "snapshot_id": snapshot.snapshot_id,
-                        "candidate_count": journal_count,
-                    },
+                    payload={"snapshot_id": snapshot.snapshot_id, "candidate_count": journal_count},
                 )
             )
 
@@ -137,19 +140,12 @@ class TradingPlatformService:
         }
 
 
-def _journal_entry(
-    raw: Mapping[str, Any],
-    *,
-    snapshot: TradingDeskSnapshot,
-) -> JournalEntry | None:
+def _journal_entry(raw: Mapping[str, Any], *, snapshot: TradingDeskSnapshot) -> JournalEntry | None:
     symbol = str(raw.get("symbol") or "").strip().upper()
     if not symbol:
         return None
     decision = _decision(raw.get("decision"))
-    if decision is DeskDecision.NO_DATA:
-        decision_value: DeskDecision | None = None
-    else:
-        decision_value = decision
+    decision_value = None if decision is DeskDecision.NO_DATA else decision
     return JournalEntry(
         stage=stage_for_decision(decision_value),
         environment=snapshot.environment,
@@ -179,11 +175,7 @@ def _journal_entry(
         watch_reasons=_strings(raw.get("watch_reasons")),
         data_source=_text(raw.get("data_source")),
         option_feed=_text(raw.get("option_feed")),
-        execution_grade_feed=(
-            bool(raw.get("execution_grade_feed"))
-            if raw.get("execution_grade_feed") is not None
-            else None
-        ),
+        execution_grade_feed=bool(raw.get("execution_grade_feed")) if raw.get("execution_grade_feed") is not None else None,
     )
 
 
