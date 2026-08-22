@@ -27,6 +27,7 @@ from src.options_market.alpaca_current import (  # noqa: E402
     AlpacaCurrentOptionsConfig,
     AlpacaCurrentOptionsReader,
 )
+from src.trading_platform import DataPlaneManifest  # noqa: E402
 
 UTC = timezone.utc
 
@@ -35,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh focused current option candidates")
     parser.add_argument("--focus-json", required=True, type=Path, help="Chart candidates or analysis JSON")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--manifest", type=Path, help="Optional data-plane freshness manifest")
     parser.add_argument("--feed", choices=["indicative", "opra"], default="indicative")
     parser.add_argument("--top-n", type=int, default=50)
     parser.add_argument("--target-profit-pct", type=float, default=300.0)
@@ -114,6 +116,32 @@ def main() -> int:
     # metadata file so provenance is not lost while preserving that simple API.
     _atomic_json(args.output, options)
     _atomic_json(args.output.with_suffix(args.output.suffix + ".meta.json"), payload)
+
+    errors = [row for row in status if row.get("status") == "error"]
+    if args.manifest:
+        manifest = DataPlaneManifest(args.manifest)
+        if status and len(errors) == len(status):
+            manifest.mark_error(
+                "options_market",
+                f"all {len(status)} focused option refreshes failed",
+                source=f"alpaca:{args.feed}",
+                observed_at=observed_at,
+            )
+        else:
+            manifest.mark_success(
+                "options_market",
+                observed_at=observed_at,
+                source=f"alpaca:{args.feed}",
+                detail=f"{len(status) - len(errors)}/{len(status)} focus symbols refreshed",
+                metadata={
+                    "feed": args.feed,
+                    "execution_grade_feed": args.feed == "opra",
+                    "focus_count": len(focus),
+                    "errors": len(errors),
+                    "output": str(args.output),
+                },
+            )
+
     print(json.dumps({key: value for key, value in payload.items() if key != "options"}, ensure_ascii=False))
     return 0
 
