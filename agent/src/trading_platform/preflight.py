@@ -1,15 +1,19 @@
 """Operational readiness preflight for the personal Trading Desk.
 
-The preflight is read-only. It distinguishes three different states that should
-never be conflated:
+The preflight is read-only and deliberately separates states that should never
+be conflated:
 
 * platform_operational: software/store/calendar are usable;
+* historical_provider_configured: a Databento credential exists;
+* historical_replay_ready: the PIT research store actually contains equity and
+  option rows that can be replayed;
+* historical_evidence_ready: labeled historical outcomes actually exist;
 * paper_runtime_ready: Alpaca paper account and OPRA access are reachable;
 * paper_submit_ready_now: a specific candidate also has passing evidence, fresh
   execution data, an unblocked account and an open market.
 
-Secrets are never returned. Missing credentials/entitlements are converted into
-specific operator actions instead of dumping configuration values.
+Secrets are never returned. Missing credentials/data/entitlements become
+specific operator actions instead of being inferred from a key existing.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
+import duckdb
 import requests
 
 from src.trading import tap_forward
@@ -43,29 +48,29 @@ def run_platform_preflight(
     now: datetime | None = None,
     max_quote_age_seconds: float = 90.0,
 ) -> dict[str, Any]:
-    """Run read-only software, data, broker and execution-readiness checks."""
+    """Run read-only software, historical-data, broker and execution checks."""
     observed_at = _aware_now(now)
     checks: dict[str, dict[str, Any]] = {}
     operator_actions: list[str] = []
     current_conditions: list[str] = []
+    platform_store_path = Path(store_path)
+    data_dir = platform_store_path.parent
 
     checks["calendar_runtime"] = _calendar_check()
 
     snapshot = None
-    store_error = None
     try:
-        with TradingPlatformStore(store_path) as store:
+        with TradingPlatformStore(platform_store_path) as store:
             snapshot = store.latest_snapshot()
             counts = store.counts()
         checks["trading_store"] = {
             "ok": True,
-            "path": str(store_path),
+            "path": str(platform_store_path),
             "snapshot_present": snapshot is not None,
             "counts": counts,
         }
-    except Exception as exc:  # noqa: BLE001 - preflight reports, never hides, readiness failures
-        store_error = f"{type(exc).__name__}: {exc}"
-        checks["trading_store"] = {"ok": False, "error": store_error}
+    except Exception as exc:  # noqa: BLE001 - preflight reports readiness failures
+        checks["trading_store"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     if snapshot is not None:
         checks["desk_data_quality"] = {
@@ -84,6 +89,10 @@ def run_platform_preflight(
     else:
         checks["desk_data_quality"] = {"ok": False, "reason": "no_trading_desk_snapshot"}
         checks["desk_account_risk"] = {"ok": False, "reason": "no_trading_desk_snapshot"}
+
+    historical = _historical_readiness(data_dir)
+    checks.update(historical["checks"])
+    operator_actions.extend(historical["operator_actions"])
 
     payload = dict(execution_input or {})
     candidate = payload.get("candidate") if isinstance(payload.get("candidate"), Mapping) else {}
@@ -145,7 +154,6 @@ def run_platform_preflight(
         checks["alpaca_paper_account"] = {"ok": False, "reason": "broker_configuration_not_ready"}
         checks["market_clock"] = {"ok": False, "reason": "broker_configuration_not_ready"}
 
-    opra_quote = None
     if contract and broker_reads_allowed:
         try:
             opra_quote = fetch_current_option_quote(
@@ -181,15 +189,6 @@ def run_platform_preflight(
     else:
         checks["opra_option_data"] = {"ok": False, "reason": "broker_configuration_not_ready"}
 
-    databento_present = bool(os.environ.get("DATABENTO_API_KEY"))
-    checks["historical_replay_provider"] = {
-        "ok": databento_present,
-        "provider": "databento",
-        "credential_present": databento_present,
-    }
-    if not databento_present:
-        operator_actions.append("set_DATABENTO_API_KEY_in_runtime_for_historical_replay")
-
     software_ok = bool(checks["calendar_runtime"].get("ok")) and bool(checks["trading_store"].get("ok"))
     paper_account_ok = bool(checks["alpaca_configuration"].get("ok")) and bool(checks["alpaca_paper_account"].get("ok"))
     opra_access = bool(checks["opra_option_data"].get("access"))
@@ -205,11 +204,13 @@ def run_platform_preflight(
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "observed_at": observed_at.isoformat(),
         "platform_operational": software_ok,
         "research_data_ready": desk_data_ok,
-        "historical_replay_ready": databento_present,
+        "historical_provider_configured": historical["provider_configured"],
+        "historical_replay_ready": historical["replay_ready"],
+        "historical_evidence_ready": historical["evidence_ready"],
         "paper_runtime_ready": paper_runtime_ready,
         "paper_submit_ready_now": paper_submit_ready_now,
         "candidate_contract": contract or None,
@@ -218,8 +219,101 @@ def run_platform_preflight(
         "current_conditions": _dedupe(current_conditions),
         "notes": [
             "Preflight is read-only and never places, cancels or replaces an order.",
+            "A Databento key means provider access may be configured; it does not mean historical rows or labeled outcomes exist.",
             "paper_submit_ready_now is intentionally false unless a specific candidate's EV, walk-forward and risk reports are supplied and passing.",
         ],
+    }
+
+
+def _historical_readiness(data_dir: Path) -> dict[str, Any]:
+    provider_configured = bool(os.environ.get("DATABENTO_API_KEY"))
+    research_store = data_dir / "options-research.duckdb"
+    outcomes_path = data_dir / "historical-outcomes.json"
+    evidence_path = data_dir / "evidence-summary.json"
+    checks: dict[str, dict[str, Any]] = {
+        "historical_provider": {
+            "ok": provider_configured,
+            "provider": "databento",
+            "credential_present": provider_configured,
+        }
+    }
+    actions: list[str] = []
+    if not provider_configured:
+        actions.append("set_DATABENTO_API_KEY_in_runtime_for_historical_backfill")
+
+    equity_rows = 0
+    option_rows = 0
+    store_error: str | None = None
+    if research_store.exists():
+        try:
+            connection = duckdb.connect(str(research_store), read_only=True)
+            try:
+                equity_rows = int(connection.execute("SELECT COUNT(*) FROM equity_bars").fetchone()[0])
+                option_rows = int(connection.execute("SELECT COUNT(*) FROM option_quotes").fetchone()[0])
+            finally:
+                connection.close()
+        except Exception as exc:  # noqa: BLE001
+            store_error = f"{type(exc).__name__}: {exc}"
+    replay_ready = equity_rows > 0 and option_rows > 0
+    checks["historical_research_store"] = {
+        "ok": replay_ready,
+        "path": str(research_store),
+        "present": research_store.exists(),
+        "equity_rows": equity_rows,
+        "option_quote_rows": option_rows,
+        "error": store_error,
+    }
+    if not replay_ready:
+        actions.append("review_backfill_plan_then_populate_point_in_time_research_store")
+
+    outcome_count = 0
+    outcome_error: str | None = None
+    if outcomes_path.exists():
+        try:
+            payload = json.loads(outcomes_path.read_text(encoding="utf-8"))
+            rows = payload.get("outcomes") if isinstance(payload, Mapping) else payload
+            if isinstance(rows, list):
+                outcome_count = len([row for row in rows if isinstance(row, Mapping)])
+            else:
+                outcome_error = "outcomes payload is not a list"
+        except (OSError, json.JSONDecodeError) as exc:
+            outcome_error = f"{type(exc).__name__}: {exc}"
+    evidence_ready = outcome_count > 0
+    checks["historical_outcomes"] = {
+        "ok": evidence_ready,
+        "path": str(outcomes_path),
+        "present": outcomes_path.exists(),
+        "outcome_count": outcome_count,
+        "error": outcome_error,
+    }
+    if replay_ready and not evidence_ready:
+        actions.append("build_historical_option_outcomes_from_point_in_time_store")
+
+    candidate_evidence_present = False
+    evidence_status: str | None = None
+    if evidence_path.exists():
+        try:
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+            if isinstance(payload, Mapping):
+                evidence_status = str(payload.get("status") or "available").strip().lower()
+                candidate_evidence_present = evidence_status != "unavailable"
+        except (OSError, json.JSONDecodeError):
+            candidate_evidence_present = False
+    checks["candidate_evidence_artifact"] = {
+        "ok": candidate_evidence_present,
+        "path": str(evidence_path),
+        "present": evidence_path.exists(),
+        "status": evidence_status,
+    }
+    if evidence_ready and not candidate_evidence_present:
+        actions.append("run_continuous_worker_to_build_current_candidate_evidence")
+
+    return {
+        "provider_configured": provider_configured,
+        "replay_ready": replay_ready,
+        "evidence_ready": evidence_ready,
+        "checks": checks,
+        "operator_actions": actions,
     }
 
 
