@@ -1,0 +1,10 @@
+# Trading-platform exchange calendar supplement.
+#
+# Keep this small and independent from the main application lock so production
+# can install exchange_calendars without weakening the main --require-hashes
+# contract. Regenerate requirements-market-calendar-lock.txt from this file when
+# any version changes.
+exchange_calendars>=4.13.2,<5
+pyluach>=2.3.0,<3
+toolz>=1.0.0,<2
+korean_lunar_calendar>=0.3.1,<1
