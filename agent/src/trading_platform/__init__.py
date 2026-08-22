@@ -1,6 +1,7 @@
 """Personal trading-platform foundation."""
 
 from .data_manifest import DataPlaneManifest
+from .exit_manager import ExitPolicyConfig, evaluate_long_option_exit, scan_long_option_exits
 from .health import DEFAULT_FRESHNESS_POLICIES, FreshnessPolicy, evaluate_data_freshness
 from .journal import JournalEntry, JournalStage, stage_for_decision
 from .market_calendar import (
@@ -48,6 +49,7 @@ __all__ = [
     "DataQualitySummary",
     "DeskDecision",
     "ExecutionMode",
+    "ExitPolicyConfig",
     "FreshnessPolicy",
     "FunnelCounts",
     "HealthStatus",
@@ -66,12 +68,14 @@ __all__ = [
     "append_reconciled_order_status",
     "assess_account_portfolio_risk",
     "evaluate_data_freshness",
+    "evaluate_long_option_exit",
     "fetch_alpaca_market_clock",
     "fetch_alpaca_order",
     "fetch_current_option_quote",
     "risk_summary_from_report",
     "run_paper_option_lifecycle",
     "run_platform_preflight",
+    "scan_long_option_exits",
     "stage_for_decision",
     "sync_paper_order_lifecycle",
     "xnys_session_calendar",
