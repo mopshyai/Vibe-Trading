@@ -135,7 +135,11 @@ def calibrate_score_buckets(
     frame = pd.DataFrame(rows)
     if score_field not in frame.columns:
         raise ValueError(f"outcomes do not contain score field {score_field!r}")
+    if "target_hit" not in frame.columns:
+        raise ValueError("outcomes do not contain required field 'target_hit'")
+
     frame[score_field] = pd.to_numeric(frame[score_field], errors="coerce")
+    frame["target_hit"] = _bool_series(frame["target_hit"])
     frame = frame.dropna(subset=[score_field, "target_hit"])
     frame = frame[(frame[score_field] >= 0.0) & (frame[score_field] <= 100.0)]
     if frame.empty:
@@ -154,12 +158,14 @@ def calibrate_score_buckets(
         end = min(100, int(start) + cfg.score_bucket_size)
         sample_size = int(len(group))
         target_rate = _mean_bool(group["target_hit"])
-        full_loss_rate = _mean_bool(group.get("full_loss_proxy", pd.Series(False, index=group.index)))
-        touch_2x_rate = _mean_bool(group.get("touch_2x", pd.Series(False, index=group.index)))
-        touch_3x_rate = _mean_bool(group.get("touch_3x", pd.Series(False, index=group.index)))
-        touch_4x_rate = _mean_bool(group.get("touch_4x", group["target_hit"]))
-        max_multiple = pd.to_numeric(group.get("max_multiple"), errors="coerce")
-        end_return = pd.to_numeric(group.get("end_return_pct"), errors="coerce")
+        full_loss_rate = _mean_bool(_optional_bool_series(group, "full_loss_proxy"))
+        touch_2x_rate = _mean_bool(_optional_bool_series(group, "touch_2x"))
+        touch_3x_rate = _mean_bool(_optional_bool_series(group, "touch_3x"))
+        touch_4x_rate = _mean_bool(
+            _optional_bool_series(group, "touch_4x", fallback=group["target_hit"])
+        )
+        max_multiple = _optional_numeric_series(group, "max_multiple")
+        end_return = _optional_numeric_series(group, "end_return_pct")
         buckets.append(
             {
                 "score_min": int(start),
@@ -224,7 +230,49 @@ def _index_value(value: object) -> object:
     return value
 
 
+def _bool_series(series: pd.Series) -> pd.Series:
+    """Parse actual/JSON-like booleans without treating non-empty 'False' as true."""
+    def parse(value: object) -> bool | None:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes"}:
+                return True
+            if normalized in {"false", "0", "no"}:
+                return False
+        return None
+
+    return series.map(parse)
+
+
+def _optional_bool_series(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    fallback: pd.Series | None = None,
+) -> pd.Series:
+    if column in frame.columns:
+        parsed = _bool_series(frame[column])
+        return parsed.fillna(False)
+    if fallback is not None:
+        return _bool_series(fallback).fillna(False)
+    return pd.Series(False, index=frame.index, dtype=bool)
+
+
+def _optional_numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+
+
 def _mean_bool(series: pd.Series) -> float:
+    if series.empty:
+        return 0.0
     return float(series.fillna(False).astype(bool).mean())
 
 
