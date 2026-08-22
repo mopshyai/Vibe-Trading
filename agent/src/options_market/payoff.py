@@ -97,7 +97,11 @@ def evaluate_payoff_targets(
     }
 
 
-def _evaluate_target(rows: Sequence[Mapping[str, Any]], target_profit_pct: float, cfg: PayoffPolicyConfig) -> dict[str, Any]:
+def _evaluate_target(
+    rows: Sequence[Mapping[str, Any]],
+    target_profit_pct: float,
+    cfg: PayoffPolicyConfig,
+) -> dict[str, Any]:
     target_multiple = 1.0 + target_profit_pct / 100.0
     policy_returns: list[float] = []
     hits: list[bool] = []
@@ -121,9 +125,10 @@ def _evaluate_target(rows: Sequence[Mapping[str, Any]], target_profit_pct: float
             "target_multiple": target_multiple,
             "samples": 0,
             "target_hit_rate": 0.0,
-            "expected_return_pct": 0.0,
-            "lower_confidence_bound_pct": float("-inf"),
-            "upper_confidence_bound_pct": float("inf"),
+            "expected_return_pct": None,
+            "return_std_pct": None,
+            "lower_confidence_bound_pct": None,
+            "upper_confidence_bound_pct": None,
             "positive_ev": False,
         }
 
