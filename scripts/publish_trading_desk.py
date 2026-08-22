@@ -36,7 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycle-json", required=True, type=Path)
     parser.add_argument("--store", type=Path, default=None)
     parser.add_argument("--environment", choices=[item.value for item in PlatformEnvironment], default="research")
-    parser.add_argument("--health-json", type=Path, help="Component freshness observations")
+    parser.add_argument(
+        "--health-json",
+        type=Path,
+        help="Component observations or a DataPlaneManifest JSON file",
+    )
     parser.add_argument("--risk-json", type=Path, help="RiskSummary-compatible JSON")
     parser.add_argument("--commit-sha")
     parser.add_argument("--platform-version", default="personal-trading-platform-v0.1")
@@ -52,6 +56,16 @@ def _mapping_file(path: Path | None) -> dict[str, Any]:
     return dict(payload)
 
 
+def _health_components(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    nested = payload.get("components")
+    source = nested if isinstance(nested, Mapping) else payload
+    return {
+        str(name): dict(value)
+        for name, value in source.items()
+        if isinstance(value, Mapping)
+    }
+
+
 def main() -> int:
     args = parse_args()
     cycle = _mapping_file(args.cycle_json)
@@ -59,13 +73,7 @@ def main() -> int:
     risk_payload = _mapping_file(args.risk_json)
 
     if health_payload:
-        quality = evaluate_data_freshness(
-            {
-                str(name): dict(value)
-                for name, value in health_payload.items()
-                if isinstance(value, Mapping)
-            }
-        )
+        quality = evaluate_data_freshness(_health_components(health_payload))
     else:
         quality = DataQualitySummary(
             healthy=False,

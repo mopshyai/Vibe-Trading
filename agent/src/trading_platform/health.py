@@ -18,6 +18,7 @@ class FreshnessPolicy(BaseModel):
 
 
 DEFAULT_FRESHNESS_POLICIES: dict[str, FreshnessPolicy] = {
+    "equity_universe": FreshnessPolicy(max_age_seconds=86_400, blocking=True),
     "equity_market": FreshnessPolicy(max_age_seconds=120, blocking=True),
     "options_market": FreshnessPolicy(max_age_seconds=60, blocking=True),
     "market_calendar": FreshnessPolicy(max_age_seconds=86_400, blocking=True),
@@ -52,7 +53,13 @@ def evaluate_data_freshness(
         observed_at = _timestamp(raw.get("observed_at"))
         age_seconds: float | None = None
         if observed_at is not None:
-            age_seconds = max(0.0, (reference.astimezone(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds())
+            age_seconds = max(
+                0.0,
+                (
+                    reference.astimezone(timezone.utc)
+                    - observed_at.astimezone(timezone.utc)
+                ).total_seconds(),
+            )
 
         if explicit_error:
             status = HealthStatus.ERROR
@@ -62,7 +69,10 @@ def evaluate_data_freshness(
             detail = str(raw.get("detail") or "missing observed_at")
         elif age_seconds is not None and age_seconds > policy.max_age_seconds:
             status = HealthStatus.STALE
-            detail = str(raw.get("detail") or f"age {age_seconds:.1f}s exceeds {policy.max_age_seconds:.1f}s")
+            detail = str(
+                raw.get("detail")
+                or f"age {age_seconds:.1f}s exceeds {policy.max_age_seconds:.1f}s"
+            )
         else:
             status = HealthStatus.OK
             detail = str(raw.get("detail") or "fresh")

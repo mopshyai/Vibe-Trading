@@ -16,6 +16,10 @@ on:
       - "frontend/src/components/layout/Layout.tsx"
       - "frontend/tsconfig.json"
       - "scripts/publish_trading_desk.py"
+      - "scripts/generate_us_market_calendar.py"
+      - "scripts/refresh_us_universe.py"
+      - "scripts/refresh_focused_options.py"
+      - "scripts/backfill_us_market_data.py"
       - ".github/workflows/trading-platform-ci.yml"
   workflow_dispatch:
 
@@ -32,11 +36,11 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install targeted dependencies
-        run: python -m pip install --upgrade pip pytest pydantic duckdb numpy pandas requests
-      - name: Compile platform modules and API assembler
+        run: python -m pip install --upgrade pip pytest pydantic duckdb numpy pandas requests "exchange_calendars>=4.13.2,<5"
+      - name: Compile platform modules, data CLIs and API assembler
         run: |
           python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py
-          python -m py_compile agent/api_server.py
+          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/backfill_us_market_data.py
       - name: Run platform and personal-decision tests
         env:
           PYTHONPATH: agent
