@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the Vibe-Trading web server and Trading Desk worker as one service.
+"""Run the Vibe-Trading web server and supervised platform workers as one service.
 
 A single process supervisor is intentional for the current DuckDB architecture:
-the API and continuous worker share the same persistent filesystem. If either
-child exits, this supervisor terminates the other and exits so the hosting
-platform can restart the complete service rather than serving a stale desk.
+the API, whole-market research worker, and lifecycle/learning worker share the
+same persistent filesystem. If any child exits unexpectedly, the supervisor
+terminates the others and exits so the hosting platform restarts the complete
+service rather than serving stale or partially-updated state.
 """
 
 from __future__ import annotations
@@ -25,13 +26,23 @@ def main() -> int:
         os.environ.get("TRADING_PLATFORM_DATA_DIR")
         or (Path.home() / ".vibe-trading" / "trading-platform")
     )
-    worker = subprocess.Popen(
+    market_worker = subprocess.Popen(
         [
             sys.executable,
             str(ROOT / "scripts" / "run_trading_platform_worker.py"),
             "--data-dir",
             data_dir,
             "--force-full",
+        ],
+        cwd=ROOT,
+        env=os.environ.copy(),
+    )
+    lifecycle_worker = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "run_trading_platform_lifecycle_worker.py"),
+            "--data-dir",
+            data_dir,
         ],
         cwd=ROOT,
         env=os.environ.copy(),
@@ -49,7 +60,12 @@ def main() -> int:
         env=os.environ.copy(),
     )
 
-    children = (worker, web)
+    named_children = (
+        ("market_worker", market_worker),
+        ("lifecycle_worker", lifecycle_worker),
+        ("web", web),
+    )
+    children = tuple(child for _, child in named_children)
     stopping = False
 
     def stop(signum: int, _frame: object) -> None:
@@ -67,16 +83,19 @@ def main() -> int:
 
     try:
         while True:
-            worker_code = worker.poll()
-            web_code = web.poll()
-            if worker_code is not None or web_code is not None:
+            exited = [
+                (name, child.poll())
+                for name, child in named_children
+                if child.poll() is not None
+            ]
+            if exited:
+                name, code = exited[0]
+                print(f"trading platform child {name} exited with code {code}; restarting service", flush=True)
                 for child in children:
                     if child.poll() is None:
                         child.terminate()
                 _wait(children, timeout=20.0)
-                if web_code is not None:
-                    return int(web_code)
-                return int(worker_code or 1)
+                return int(code or 1)
             time.sleep(1.0)
     finally:
         for child in children:
