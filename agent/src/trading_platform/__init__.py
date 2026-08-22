@@ -36,6 +36,7 @@ from .portfolio_risk import (
     assess_account_portfolio_risk,
     risk_summary_from_report,
 )
+from .preflight import run_platform_preflight
 from .service import TradingPlatformService
 from .store import TradingPlatformStore
 
@@ -70,6 +71,7 @@ __all__ = [
     "fetch_current_option_quote",
     "risk_summary_from_report",
     "run_paper_option_lifecycle",
+    "run_platform_preflight",
     "stage_for_decision",
     "sync_paper_order_lifecycle",
     "xnys_session_calendar",
