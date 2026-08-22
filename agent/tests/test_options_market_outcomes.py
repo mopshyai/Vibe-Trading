@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.options_market.outcomes import OutcomeConfig, calibrate_score_buckets, label_long_option_path
 
@@ -65,3 +66,23 @@ def test_score_bucket_calibration_reports_sample_validity() -> None:
     assert bucket["empirical_target_hit_rate"] == 0.5
     assert bucket["calibration_valid"] is False
     assert "not guaranteed future probabilities" in result["warning"]
+
+
+def test_missing_required_target_hit_fails_closed() -> None:
+    with pytest.raises(ValueError, match="target_hit"):
+        calibrate_score_buckets([{"ranking_score": 80}])
+
+
+def test_optional_path_statistics_can_be_absent() -> None:
+    result = calibrate_score_buckets(
+        [
+            {"ranking_score": 81, "target_hit": "true"},
+            {"ranking_score": 82, "target_hit": "false"},
+        ],
+        config=OutcomeConfig(min_bucket_samples=2),
+    )
+    bucket = result["buckets"][0]
+    assert bucket["empirical_target_hit_rate"] == 0.5
+    assert bucket["median_max_multiple"] is None
+    assert bucket["mean_end_return_pct"] is None
+    assert bucket["calibration_valid"] is True
