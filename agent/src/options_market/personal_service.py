@@ -37,6 +37,7 @@ AccountStateProvider = Callable[[datetime], PersonalAccountState]
 EvidenceProvider = Callable[[Sequence[Mapping[str, Any]], datetime], PersonalEvidence]
 DashboardLoad = Callable[[], Mapping[str, Any] | None]
 DashboardSave = Callable[[Mapping[str, Any]], None]
+CyclePublisher = Callable[[Mapping[str, Any]], None]
 
 
 class PersonalContinuousOptionsService:
@@ -52,6 +53,7 @@ class PersonalContinuousOptionsService:
         risk_config: PortfolioRiskConfig | None = None,
         load_previous_dashboard: DashboardLoad | None = None,
         save_dashboard: DashboardSave | None = None,
+        publish_cycle: CyclePublisher | None = None,
     ) -> None:
         self.analyzer = analyzer
         self.account_provider = account_provider
@@ -60,6 +62,7 @@ class PersonalContinuousOptionsService:
         self.risk_config = risk_config
         self.load_previous_dashboard = load_previous_dashboard
         self.save_dashboard = save_dashboard
+        self.publish_cycle = publish_cycle
 
     def run_cycle(
         self,
@@ -96,7 +99,7 @@ class PersonalContinuousOptionsService:
         alert = build_alert_event(dashboard, previous)
         if self.save_dashboard:
             self.save_dashboard(dashboard)
-        return {
+        result = {
             "mode": "continuous_personal_options_research",
             "market": market,
             "personal": personal,
@@ -104,6 +107,9 @@ class PersonalContinuousOptionsService:
             "alert": alert,
             "execution": "none",
         }
+        if self.publish_cycle:
+            self.publish_cycle(result)
+        return result
 
 
 def _latest_candidates(market: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -130,6 +136,7 @@ def _funnel(market: Mapping[str, Any]) -> dict[str, int]:
 
 
 __all__ = [
+    "CyclePublisher",
     "PersonalAccountState",
     "PersonalContinuousOptionsService",
     "PersonalEvidence",
