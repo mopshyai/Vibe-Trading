@@ -8,12 +8,13 @@ than duplicating their trading/research rules:
 2. run a whole-market/phase-aware chart pass from the point-in-time store,
 3. refresh focused OPRA/current option data and catalyst news,
 4. rerun the analysis with those current focused inputs,
-5. read the Alpaca PAPER account and calculate account-level risk,
-6. apply personal EV/walk-forward/regime/contract/risk gates,
-7. publish the durable Trading Desk snapshot and complete candidate journal,
-8. prepare a current dry-run PAPER proposal when a candidate is truly ready,
-9. reconcile any previously submitted PAPER orders,
-10. publish a read-only operational preflight + heartbeat.
+5. build current candidate EV/walk-forward evidence from point-in-time outcomes,
+6. read the Alpaca PAPER account and calculate account-level risk,
+7. apply personal evidence/regime/contract/risk gates,
+8. publish the durable Trading Desk snapshot and complete candidate journal,
+9. prepare a current dry-run PAPER proposal when a candidate is truly ready,
+10. reconcile any previously submitted PAPER orders,
+11. publish a read-only operational preflight + heartbeat.
 
 The worker NEVER submits a new broker order. New paper mutations remain behind
 ``run_paper_option_lifecycle.py --submit-paper --confirm-paper-submit``. The
@@ -191,6 +192,49 @@ def run_worker_cycle(
         statuses["analysis_pass_2"] = {"status": "skipped", "reason": "current_analysis_pass_failed"}
     current_analysis_ok = statuses["analysis_pass_2"].get("status") == "ok"
 
+    # Evidence is rebuilt against the current candidate set. Never carry an old
+    # EV/walk-forward approval into a new cycle when outcome history or the
+    # evidence build is unavailable.
+    if current_analysis_ok and paths["outcomes"].exists():
+        statuses["evidence"] = _run(
+            [
+                "build_options_evidence.py",
+                "--outcomes-json", str(paths["outcomes"]),
+                "--analysis-json", str(paths["analysis"]),
+                "--as-of", now.isoformat(),
+                "--ev-output", str(paths["ev"]),
+                "--walkforward-output", str(paths["walkforward"]),
+                "--summary-output", str(paths["evidence_summary"]),
+            ],
+            timeout=command_timeout,
+        )
+    else:
+        statuses["evidence"] = {
+            "status": "skipped",
+            "reason": (
+                "historical_outcomes_not_available"
+                if not paths["outcomes"].exists()
+                else "current_analysis_unavailable"
+            ),
+        }
+    if statuses["evidence"].get("status") != "ok":
+        _atomic_json(paths["ev"], {})
+        _atomic_json(paths["walkforward"], {})
+        _atomic_json(
+            paths["evidence_summary"],
+            {
+                "schema_version": 1,
+                "mode": "candidate_empirical_evidence",
+                "as_of": now.isoformat(),
+                "candidate_count": 0,
+                "eligible_historical_outcomes": 0,
+                "status": "unavailable",
+                "reason": statuses["evidence"].get("reason") or "evidence_build_failed",
+                "ev_reports": {},
+                "walkforward_reports": {},
+            },
+        )
+
     statuses["account_risk"] = _run(
         [
             "assess_account_risk.py",
@@ -212,11 +256,9 @@ def run_worker_cycle(
             "--analysis-json", str(paths["analysis"]),
             "--alpaca-account",
             "--output", str(paths["personal_cycle"]),
+            "--ev-json", str(paths["ev"]),
+            "--walkforward-json", str(paths["walkforward"]),
         ]
-        if paths["ev"].exists():
-            personal_cmd += ["--ev-json", str(paths["ev"])]
-        if paths["walkforward"].exists():
-            personal_cmd += ["--walkforward-json", str(paths["walkforward"])]
         if paths["dashboard"].exists():
             personal_cmd += ["--previous-dashboard", str(paths["dashboard"])]
         statuses["personal"] = _run(personal_cmd, timeout=command_timeout)
@@ -338,8 +380,10 @@ def _paths(data_dir: Path) -> dict[str, Path]:
         "risk_summary": data_dir / "account-risk-summary.json",
         "personal_cycle": data_dir / "personal-cycle.json",
         "dashboard": data_dir / "previous-dashboard.json",
+        "outcomes": data_dir / "historical-outcomes.json",
         "ev": data_dir / "ev-reports.json",
         "walkforward": data_dir / "walkforward-reports.json",
+        "evidence_summary": data_dir / "evidence-summary.json",
         "execution_input": data_dir / "paper-execution-input.json",
         "paper_proposal": data_dir / "paper-proposal.json",
         "paper_sync": data_dir / "paper-sync.json",
