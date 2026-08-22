@@ -67,3 +67,22 @@ def test_300_percent_target_is_four_times_premium() -> None:
         {"ABC.US": [_option("call")]},
     )
     assert result["target_multiple"] == 4.0
+
+
+def test_invalid_direction_fails_closed() -> None:
+    result = combine_rankings(
+        [_chart("ABC.US", "sideways", 85)],
+        {"ABC.US": [_option("put")]},
+    )
+    assert result["decision"] == "NO_TRADE"
+    assert result["rejected"][0]["reason"] == "invalid_chart_direction"
+
+
+def test_malformed_target_profit_does_not_crash() -> None:
+    option = _option("call")
+    option["target_profit_pct"] = None
+    result = combine_rankings(
+        [_chart("ABC.US", "bullish", 85)],
+        {"ABC.US": [option]},
+    )
+    assert result["candidate_count"] == 1
