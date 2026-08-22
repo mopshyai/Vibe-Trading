@@ -125,7 +125,7 @@ def test_personal_candidate_trade_ready_requires_all_gates() -> None:
     assert report["max_contracts_within_configured_single_trade_risk"] == 1
 
 
-def test_personal_shortlist_caps_trade_ready_candidates() -> None:
+def test_personal_shortlist_caps_trade_ready_candidates_and_journals_all() -> None:
     candidates = []
     ev_reports = {}
     walk_reports = {}
@@ -148,3 +148,10 @@ def test_personal_shortlist_caps_trade_ready_candidates() -> None:
     ready = [row for row in result["candidates"] if row["decision"] == "TRADE_READY_RESEARCH"]
     assert len(ready) <= 2
     assert result["decision"] == "TRADE_READY_RESEARCH"
+
+    journal = result["journal_candidates"]
+    assert len(journal) == 4
+    assert sum(row["displayed"] for row in journal) == 3
+    assert sum(row["decision"] == "TRADE_READY_RESEARCH" for row in journal) == 2
+    capped = [row for row in journal if "daily_trade_ready_cap" in row["watch_reasons"]]
+    assert len(capped) == 2
