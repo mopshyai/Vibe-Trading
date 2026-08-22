@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run the Vibe-Trading web server and Trading Desk worker as one service.
+"""Run web, Trading Desk worker and whole-market equity refresher together.
 
 A single process supervisor is intentional for the current DuckDB architecture:
-the API and continuous worker share the same persistent filesystem. If either
-child exits, this supervisor terminates the other and exits so the hosting
-platform can restart the complete service rather than serving a stale desk.
+the API, research worker and bulk equity refresh loop share one persistent
+filesystem. If any child exits, the supervisor terminates the others and exits so
+the hosting platform restarts the complete stack rather than serving stale state.
 """
 
 from __future__ import annotations
@@ -36,6 +36,16 @@ def main() -> int:
         cwd=ROOT,
         env=os.environ.copy(),
     )
+    equity_refresh = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "run_equity_refresh_loop.py"),
+            "--data-dir",
+            data_dir,
+        ],
+        cwd=ROOT,
+        env=os.environ.copy(),
+    )
     web = subprocess.Popen(
         [
             "vibe-trading",
@@ -49,7 +59,7 @@ def main() -> int:
         env=os.environ.copy(),
     )
 
-    children = (worker, web)
+    children = (worker, equity_refresh, web)
     stopping = False
 
     def stop(signum: int, _frame: object) -> None:
@@ -67,16 +77,16 @@ def main() -> int:
 
     try:
         while True:
-            worker_code = worker.poll()
-            web_code = web.poll()
-            if worker_code is not None or web_code is not None:
+            exit_codes = [child.poll() for child in children]
+            if any(code is not None for code in exit_codes):
                 for child in children:
                     if child.poll() is None:
                         child.terminate()
                 _wait(children, timeout=20.0)
-                if web_code is not None:
-                    return int(web_code)
-                return int(worker_code or 1)
+                for code in exit_codes:
+                    if code is not None:
+                        return int(code or 1)
+                return 1
             time.sleep(1.0)
     finally:
         for child in children:
