@@ -21,42 +21,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Isolated venv we can copy wholesale into the runtime stage.
 ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 WORKDIR /app
 
-# Python deps first for layer caching. Installed from the hash-pinned lock
-# (agent/requirements.txt is the human-edited source; regenerate the lock
-# with the command documented at the top of requirements-lock.txt whenever
-# agent/requirements.txt changes).
 COPY agent/requirements.txt agent/requirements.txt
 COPY requirements-lock.txt requirements-lock.txt
 RUN pip install --no-cache-dir --require-hashes -r requirements-lock.txt
 
-# The Trading Desk's authoritative XNYS calendar is intentionally isolated in a
-# small hash-pinned supplement. The main lock already supplies numpy, pandas and
-# tzdata; --no-deps means this install cannot silently expand the dependency set.
+# Authoritative XNYS calendar supplement. The main lock already supplies numpy,
+# pandas and tzdata. --no-deps prevents silent dependency expansion.
 COPY agent/requirements-market-calendar.txt agent/requirements-market-calendar.txt
 COPY requirements-market-calendar-lock.txt requirements-market-calendar-lock.txt
 RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements-market-calendar-lock.txt \
     && python -c "import exchange_calendars as xcals; assert 'XNYS' in xcals.get_calendar_names()"
 
-# Channel SDKs (feishu + telegram) come from their own hash-pinned lock, not
-# from `pip install -e ".[feishu,telegram]"`. An extras install resolves against
-# whatever PyPI serves at build time with no hashes, which would quietly opt the
-# image out of the contract the line above establishes. To change the channel
-# set, edit agent/requirements-channels.txt and regenerate the lock with the
-# command documented at the top of that file.
 COPY requirements-channels-lock.txt requirements-channels-lock.txt
 RUN pip install --no-cache-dir --require-hashes -r requirements-channels-lock.txt
 
-# Copy project + install the CLI entrypoint (editable — the runtime stage
-# re-creates the same /app/agent source tree the .pth file points at).
-# --no-deps because every dependency is already installed from the two locks
-# above; without it pip re-resolves and downloads unhashed wheels.
 COPY pyproject.toml LICENSE README.md ./
 COPY agent/ agent/
 RUN pip install --no-cache-dir --no-deps -e .
@@ -78,11 +62,6 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Runtime-only native libs. NO build-essential here — these are weasyprint's
-# shared libraries (Pango/HarfBuzz/Fontconfig/Cairo/gdk-pixbuf) per its official
-# Debian install list; without them the lazy `from weasyprint import HTML` in
-# reporter.py fails and PDF rendering silently downgrades to HTML-only.
-# fonts-dejavu-core gives non-blank PDFs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangoft2-1.0-0 \
@@ -93,34 +72,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Bring in the prebuilt venv from the builder stage.
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY --from=builder /opt/venv /opt/venv
 
-# Re-materialize the source tree the editable install references, plus the
-# built frontend static assets.
+# Re-materialize the source tree the editable install references and include the
+# operational scripts used by the supervised Trading Desk worker.
 COPY pyproject.toml LICENSE README.md ./
 COPY agent/ agent/
+COPY scripts/ scripts/
 COPY --from=frontend-build /app/frontend/dist frontend/dist
 
-# Runtime should not run as root. `vibe` owns the writable app-data dirs so
-# named volumes inherit usable permissions. `vibe-sandbox` is an unprivileged
-# system account (no home, no shell) that runner.py drops into via
-# subprocess.run(user="vibe-sandbox") to execute LLM-generated code with the
-# least privilege — created here by fixed contract, not otherwise used.
 RUN useradd --create-home --shell /usr/sbin/nologin vibe \
     && useradd --system --no-create-home --shell /usr/sbin/nologin --uid 10001 vibe-sandbox \
-    && mkdir -p agent/runs agent/sessions agent/uploads agent/.swarm/runs /home/vibe/.vibe-trading \
+    && mkdir -p agent/runs agent/sessions agent/uploads agent/.swarm/runs /home/vibe/.vibe-trading /app/data \
     && chown -R vibe:vibe /app /home/vibe/.vibe-trading
 USER vibe
 
-# Default port
 EXPOSE 8899
 
-# Health check — hits /live (liveness probe; /health remains a legacy alias).
+# PORT-aware liveness probe so the same image works on Render and locally.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8899/live')" || exit 1
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/live' % os.environ.get('PORT','8899'))" || exit 1
 
-# Run API server (serves frontend/dist as static files)
-CMD ["vibe-trading", "serve", "--host", "0.0.0.0", "--port", "8899"]
+# Default image behavior remains the web/API server. Hosting blueprints can
+# override this with scripts/start_trading_platform.py to run web + worker.
+CMD ["sh", "-c", "vibe-trading serve --host 0.0.0.0 --port ${PORT:-8899}"]
