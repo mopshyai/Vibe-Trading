@@ -74,7 +74,11 @@ def evaluate_long_option_exit(
     underlying = str(
         position.get("underlying") or (occ or {}).get("underlying") or ""
     ).strip().upper()
-    quantity = _positive_int(position.get("quantity") if position.get("quantity") is not None else position.get("qty"))
+    quantity = _positive_int(
+        position.get("quantity")
+        if position.get("quantity") is not None
+        else position.get("qty")
+    )
     side = str(position.get("side") or "long").strip().lower()
     entry_price = _positive(
         position.get("fill_price")
@@ -82,9 +86,11 @@ def evaluate_long_option_exit(
         or position.get("entry_price")
         or position.get("entry_ask")
     )
-    bid = _nonnegative(quote.get("bid") or quote.get("bid_price") or quote.get("bp"))
+    # Zero is a real executable-side observation for a long option. Do not use
+    # boolean ``or`` selection here because ``0.0`` must survive normalization.
+    bid = _nonnegative(_first_present(quote, "bid", "bid_price", "bp"))
     quote_time = _timestamp(
-        quote.get("quote_time") or quote.get("timestamp") or quote.get("t")
+        _first_present(quote, "quote_time", "timestamp", "t")
     )
 
     blocking: list[str] = []
@@ -378,6 +384,13 @@ def _positive_int(value: object) -> int | None:
     if number is None or number <= 0 or not float(number).is_integer():
         return None
     return int(number)
+
+
+def _first_present(mapping: Mapping[str, Any], *keys: str) -> object:
+    for key in keys:
+        if key in mapping and mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
 
 
 def _optional_bool(value: object) -> bool | None:
