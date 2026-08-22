@@ -26,6 +26,7 @@ from src.trading_platform.paper_lifecycle import (  # noqa: E402
     run_paper_option_lifecycle,
     sync_paper_order_lifecycle,
 )
+from src.trading_platform.runtime_config import load_alpaca_runtime_config  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,10 +62,15 @@ def main() -> int:
     store_path = args.store or (get_runtime_root() / "trading-platform.duckdb")
     store_path.parent.mkdir(parents=True, exist_ok=True)
     system = SystemIdentity(commit_sha=str(args.commit_sha or "").strip() or None)
+    broker_config = load_alpaca_runtime_config()
 
     with TradingPlatformStore(store_path) as store:
         if args.sync_only:
-            result = sync_paper_order_lifecycle(store=store, system=system)
+            result = sync_paper_order_lifecycle(
+                store=store,
+                system=system,
+                alpaca_config=broker_config,
+            )
         else:
             payload = _mapping(_json(args.input_json), "input JSON")
             candidate = _mapping(payload.get("candidate"), "candidate")
@@ -80,6 +86,7 @@ def main() -> int:
                 limit_price=args.limit_price,
                 submit=args.submit_paper,
                 confirm_submit=args.confirm_paper_submit,
+                alpaca_config=broker_config,
                 config=PaperLifecycleConfig(
                     option_feed=args.option_feed,
                     max_quote_age_seconds=args.max_quote_age_seconds,
