@@ -15,6 +15,7 @@ import {
 import {
   tradingDeskApi,
   type DeskDecision,
+  type RiskBucket,
   type TradingDeskEvent,
   type TradingDeskOpportunity,
   type TradingDeskSnapshot,
@@ -36,6 +37,11 @@ function fmtPct(value: number | null | undefined, digits = 1) {
 function fmtMoney(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return "—";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+}
+
+function largestRiskPct(rows: RiskBucket[] | undefined) {
+  if (!rows?.length) return null;
+  return rows.reduce((largest, row) => Math.max(largest, row.risk_pct), 0);
 }
 
 function decisionClass(decision: DeskDecision) {
@@ -173,7 +179,7 @@ export function TradingDesk() {
             </div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight">Trading Desk</h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Whole-market research → evidence → options quality → risk → paper approval. Live execution remains disabled.
+              Whole-market research → evidence → options quality → account risk → paper approval. Live execution remains disabled.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -226,7 +232,7 @@ export function TradingDesk() {
               <MetricCard label="Universe" value={fmtNumber(snapshot.funnel.universe)} detail="U.S. securities received" icon={Database} />
               <MetricCard label="Chart candidates" value={fmtNumber(snapshot.funnel.chart_candidates)} detail={`${fmtNumber(snapshot.funnel.chart_eligible)} eligible`} icon={TrendingUp} />
               <MetricCard label="Deep analyzed" value={fmtNumber(snapshot.funnel.deep_analyzed)} detail="Options + catalysts" icon={BrainCircuit} />
-              <MetricCard label="Trade ready" value={fmtNumber(snapshot.funnel.trade_ready)} detail="After all configured gates" icon={Zap} />
+              <MetricCard label="Trade ready" value={fmtNumber(snapshot.funnel.trade_ready)} detail="After candidate + account gates" icon={Zap} />
               <MetricCard label="Data" value={dataStatus} detail={`${snapshot.data_quality.blocking_reasons.length} blocking issues`} icon={Gauge} />
               <MetricCard label="Account risk" value={snapshot.risk.open_premium_risk_pct == null ? "—" : fmtPct(snapshot.risk.open_premium_risk_pct)} detail={`${snapshot.risk.positions} open positions`} icon={WalletCards} />
             </section>
@@ -267,6 +273,37 @@ export function TradingDesk() {
                       </div>
                     ))}
                   </div>
+                </section>
+
+                <section className="rounded-xl border border-border/70 bg-card p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <WalletCards className="h-4 w-4" />
+                      <h2 className="text-sm font-semibold">Portfolio risk</h2>
+                    </div>
+                    <span className={snapshot.risk.trading_blocked ? "text-xs font-semibold text-destructive" : "text-xs font-semibold text-emerald-500"}>
+                      {snapshot.risk.trading_blocked ? "BLOCKED" : "OPEN"}
+                    </span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <Small label="Equity" value={fmtMoney(snapshot.risk.account_equity_usd)} />
+                    <Small label="Premium at risk" value={`${fmtMoney(snapshot.risk.open_premium_risk_usd)} · ${fmtPct(snapshot.risk.open_premium_risk_pct)}`} />
+                    <Small label="Daily realized" value={fmtMoney(snapshot.risk.daily_realized_pnl_usd)} />
+                    <Small label="Weekly realized" value={fmtMoney(snapshot.risk.weekly_realized_pnl_usd)} />
+                    <Small label="Max drawdown" value={fmtPct(snapshot.risk.max_drawdown_pct)} />
+                    <Small label="Dollar delta" value={fmtMoney(snapshot.risk.greeks.dollar_delta_usd as number | null | undefined)} />
+                    <Small label="Delta shares" value={fmtNumber(snapshot.risk.greeks.delta_shares as number | null | undefined, 1)} />
+                    <Small label="Theta / day" value={fmtNumber(snapshot.risk.greeks.theta_scaled_per_day as number | null | undefined, 2)} />
+                    <Small label="Vega" value={fmtNumber(snapshot.risk.greeks.vega_scaled as number | null | undefined, 2)} />
+                    <Small label="Largest underlying" value={fmtPct(largestRiskPct(snapshot.risk.concentration.underlying))} />
+                    <Small label="Largest sector" value={fmtPct(largestRiskPct(snapshot.risk.concentration.sector))} />
+                    <Small label="Largest expiry" value={fmtPct(largestRiskPct(snapshot.risk.concentration.expiry))} />
+                  </div>
+                  {snapshot.risk.blocking_reasons.length > 0 && (
+                    <div className="mt-4 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {snapshot.risk.blocking_reasons.join(" · ")}
+                    </div>
+                  )}
                 </section>
 
                 <section className="rounded-xl border border-border/70 bg-card p-4">
