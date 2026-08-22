@@ -1,8 +1,9 @@
 """Persistent point-in-time catalyst/news event store.
 
 The store preserves publication availability timestamps and source revisions.
-Research queries are explicitly constrained to ``published_at <= as_of`` so a
-historical replay cannot see a later headline or filing.
+Research queries are explicitly constrained to both publication and revision
+availability at ``as_of`` so a historical replay cannot see a later headline,
+article edit or filing revision.
 """
 
 from __future__ import annotations
@@ -85,8 +86,15 @@ class CatalystEventStore:
         if start_ts is not None and start_ts > as_of_ts:
             raise ValueError("start cannot be after as_of")
 
-        clauses = ["published_at <= ?"]
-        params: list[Any] = [as_of_ts]
+        # ``published_at`` gates initial availability. ``updated_at`` gates a
+        # later provider revision. When a later revision is the only stored
+        # version, an earlier replay fails closed rather than pretending that
+        # revised text was available at publication time.
+        clauses = [
+            "published_at <= ?",
+            "COALESCE(updated_at, published_at) <= ?",
+        ]
+        params: list[Any] = [as_of_ts, as_of_ts]
         if start_ts is not None:
             clauses.append("published_at >= ?")
             params.append(start_ts)
