@@ -1,0 +1,39 @@
+# Render Blueprint for the supervised Vibe-Trading PAPER platform.
+#
+# Secrets are intentionally `sync: false`; Render prompts for them during the
+# initial Blueprint creation flow. Do not replace these with literal keys.
+#
+# The current DuckDB architecture requires the API + worker to share one disk,
+# so this is one web-service instance supervised by start_trading_platform.py.
+# Persistent-disk services cannot be horizontally scaled.
+services:
+  - type: web
+    name: vibe-trading-paper
+    runtime: docker
+    branch: feat/trading-platform-paper-lifecycle
+    region: ohio
+    plan: starter
+    numInstances: 1
+    autoDeployTrigger: checksPass
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python scripts/start_trading_platform.py
+    healthCheckPath: /live
+    maxShutdownDelaySeconds: 30
+    disk:
+      name: trading-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: TRADING_PLATFORM_DATA_DIR
+        value: /app/data
+      - key: TRADING_PLATFORM_OPTION_FEED
+        value: opra
+      - key: ALPACA_PROFILE
+        value: paper
+      - key: APCA_API_KEY_ID
+        sync: false
+      - key: APCA_API_SECRET_KEY
+        sync: false
+      - key: DATABENTO_API_KEY
+        sync: false
