@@ -40,6 +40,48 @@ export interface TradingDeskOpportunity {
   watch_reasons: string[];
 }
 
+export interface RiskBucket {
+  key: string;
+  risk_usd: number;
+  risk_pct: number;
+}
+
+export interface TradingDeskRiskSummary {
+  account_equity_usd?: number | null;
+  open_premium_risk_usd?: number | null;
+  open_premium_risk_pct?: number | null;
+  daily_realized_pnl_usd?: number | null;
+  weekly_realized_pnl_usd?: number | null;
+  max_drawdown_pct?: number | null;
+  positions: number;
+  trading_blocked: boolean;
+  blocking_reasons: string[];
+  greeks: {
+    delta_shares?: number | null;
+    dollar_delta_usd?: number | null;
+    gamma_scaled?: number | null;
+    theta_scaled_per_day?: number | null;
+    vega_scaled?: number | null;
+    dollar_delta_pct_equity?: number | null;
+    coverage?: Record<string, { known: number; positions: number }>;
+    [key: string]: unknown;
+  };
+  concentration: {
+    underlying?: RiskBucket[];
+    sector?: RiskBucket[];
+    expiry?: RiskBucket[];
+    correlation?: {
+      threshold?: number;
+      underlyings_with_history?: number;
+      aligned_observations?: number;
+      clusters?: Array<{ underlyings: string[]; risk_usd: number; risk_pct: number }>;
+      pairs?: Array<{ left: string; right: string; correlation: number }>;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+}
+
 export interface TradingDeskSnapshot {
   schema_version: number;
   snapshot_id: string;
@@ -69,15 +111,7 @@ export interface TradingDeskSnapshot {
     trade_ready: number;
   };
   opportunities: TradingDeskOpportunity[];
-  risk: {
-    account_equity_usd?: number | null;
-    open_premium_risk_usd?: number | null;
-    open_premium_risk_pct?: number | null;
-    daily_realized_pnl_usd?: number | null;
-    positions: number;
-    trading_blocked: boolean;
-    blocking_reasons: string[];
-  };
+  risk: TradingDeskRiskSummary;
   data_quality: {
     healthy: boolean;
     components: TradingDeskHealthComponent[];
