@@ -36,6 +36,14 @@ COPY agent/requirements.txt agent/requirements.txt
 COPY requirements-lock.txt requirements-lock.txt
 RUN pip install --no-cache-dir --require-hashes -r requirements-lock.txt
 
+# The Trading Desk's authoritative XNYS calendar is intentionally isolated in a
+# small hash-pinned supplement. The main lock already supplies numpy, pandas and
+# tzdata; --no-deps means this install cannot silently expand the dependency set.
+COPY agent/requirements-market-calendar.txt agent/requirements-market-calendar.txt
+COPY requirements-market-calendar-lock.txt requirements-market-calendar-lock.txt
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements-market-calendar-lock.txt \
+    && python -c "import exchange_calendars as xcals; assert 'XNYS' in xcals.get_calendar_names()"
+
 # Channel SDKs (feishu + telegram) come from their own hash-pinned lock, not
 # from `pip install -e ".[feishu,telegram]"`. An extras install resolves against
 # whatever PyPI serves at build time with no hashes, which would quietly opt the
