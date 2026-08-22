@@ -81,7 +81,11 @@ def test_thesis_invalidation_proposes_exit_before_price_target() -> None:
 
 def test_near_expiry_time_stop_proposes_exit() -> None:
     position = _position(contract_symbol="AAPL260826C00250000")
-    result = evaluate_long_option_exit(position, {**_quote(2.05), "contract_symbol": position["contract_symbol"]}, now=NOW)
+    result = evaluate_long_option_exit(
+        position,
+        {**_quote(2.05), "contract_symbol": position["contract_symbol"]},
+        now=NOW,
+    )
     assert result["decision"] == "EXIT_PROPOSED"
     assert "time_stop_dte" in result["exit_reasons"]
     assert result["dte"] == 2
@@ -97,8 +101,51 @@ def test_scan_journals_exit_proposal_without_broker_mutation(tmp_path) -> None:
             snapshot_id="snapshot-1",
         )
         assert report["exit_proposals"] == 1
+        assert report["journal_appended"] == 1
         assert report["broker_mutation"] is False
         journal = store.recent_journal(limit=10)
         assert journal[0]["stage"] == "exit_proposed"
         assert journal[0]["contract_symbol"] == CONTRACT
         assert journal[0]["metadata"]["broker_mutation"] is False
+
+
+def test_unchanged_exit_reason_does_not_spam_journal(tmp_path) -> None:
+    with TradingPlatformStore(tmp_path / "platform.duckdb") as store:
+        first = scan_long_option_exits(
+            [_position()],
+            {CONTRACT: _quote(4.2)},
+            now=NOW,
+            store=store,
+        )
+        second = scan_long_option_exits(
+            [_position()],
+            {CONTRACT: _quote(4.3)},
+            now=NOW,
+            store=store,
+        )
+        assert first["journal_appended"] == 1
+        assert second["exit_proposals"] == 1
+        assert second["journal_appended"] == 0
+        assert second["results"][0]["journal_appended"] is False
+        journal = store.recent_journal(limit=10, contract_symbol=CONTRACT)
+        assert len(journal) == 1
+
+
+def test_materially_new_exit_reason_can_append_new_proposal(tmp_path) -> None:
+    with TradingPlatformStore(tmp_path / "platform.duckdb") as store:
+        scan_long_option_exits(
+            [_position()],
+            {CONTRACT: _quote(4.2)},
+            now=NOW,
+            store=store,
+        )
+        changed = scan_long_option_exits(
+            [_position(thesis_valid=False)],
+            {CONTRACT: _quote(4.2)},
+            now=NOW,
+            store=store,
+        )
+        assert changed["journal_appended"] == 1
+        assert "thesis_invalidated" in changed["results"][0]["exit_reasons"]
+        journal = store.recent_journal(limit=10, contract_symbol=CONTRACT)
+        assert len(journal) == 2
