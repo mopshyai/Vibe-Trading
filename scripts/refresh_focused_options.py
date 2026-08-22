@@ -5,6 +5,11 @@ This path is read-only. It uses the existing Alpaca current-options reader and
 writes a symbol -> candidate-list JSON artifact that the continuous analyzer can
 hot-reload. The selected feed is always recorded; ``indicative`` never becomes
 execution-grade by omission.
+
+Each successful focused refresh also reads a current underlying quote, so the
+optional data-plane manifest updates both ``equity_market`` and
+``options_market`` freshness. Historical backfills intentionally do not update
+these current-data components.
 """
 
 from __future__ import annotations
@@ -117,33 +122,65 @@ def main() -> int:
     _atomic_json(args.output, options)
     _atomic_json(args.output.with_suffix(args.output.suffix + ".meta.json"), payload)
 
-    errors = [row for row in status if row.get("status") == "error"]
     if args.manifest:
-        manifest = DataPlaneManifest(args.manifest)
-        if status and len(errors) == len(status):
-            manifest.mark_error(
-                "options_market",
-                f"all {len(status)} focused option refreshes failed",
-                source=f"alpaca:{args.feed}",
-                observed_at=observed_at,
-            )
-        else:
-            manifest.mark_success(
-                "options_market",
-                observed_at=observed_at,
-                source=f"alpaca:{args.feed}",
-                detail=f"{len(status) - len(errors)}/{len(status)} focus symbols refreshed",
-                metadata={
-                    "feed": args.feed,
-                    "execution_grade_feed": args.feed == "opra",
-                    "focus_count": len(focus),
-                    "errors": len(errors),
-                    "output": str(args.output),
-                },
-            )
+        _publish_manifest(
+            DataPlaneManifest(args.manifest),
+            status=status,
+            feed=args.feed,
+            observed_at=observed_at,
+            focus_count=len(focus),
+            output=args.output,
+        )
 
     print(json.dumps({key: value for key, value in payload.items() if key != "options"}, ensure_ascii=False))
     return 0
+
+
+def _publish_manifest(
+    manifest: DataPlaneManifest,
+    *,
+    status: list[dict[str, Any]],
+    feed: str,
+    observed_at: datetime,
+    focus_count: int,
+    output: Path,
+) -> None:
+    errors = [row for row in status if row.get("status") == "error"]
+    successes = len(status) - len(errors)
+    source = f"alpaca:{feed}"
+    if not status:
+        message = "no valid focused symbols were available to refresh"
+        manifest.mark_error("equity_market", message, source=source, observed_at=observed_at)
+        manifest.mark_error("options_market", message, source=source, observed_at=observed_at)
+        return
+    if len(errors) == len(status):
+        message = f"all {len(status)} focused market-data refreshes failed"
+        manifest.mark_error("equity_market", message, source=source, observed_at=observed_at)
+        manifest.mark_error("options_market", message, source=source, observed_at=observed_at)
+        return
+
+    common_metadata = {
+        "feed": feed,
+        "focus_count": focus_count,
+        "symbols_attempted": len(status),
+        "successes": successes,
+        "errors": len(errors),
+        "output": str(output),
+    }
+    manifest.mark_success(
+        "equity_market",
+        observed_at=observed_at,
+        source=source,
+        detail=f"current underlying quotes refreshed for {successes}/{len(status)} focus symbols",
+        metadata=common_metadata,
+    )
+    manifest.mark_success(
+        "options_market",
+        observed_at=observed_at,
+        source=source,
+        detail=f"current option surfaces refreshed for {successes}/{len(status)} focus symbols",
+        metadata={**common_metadata, "execution_grade_feed": feed == "opra"},
+    )
 
 
 def _focus_rows(path: Path) -> list[dict[str, Any]]:
