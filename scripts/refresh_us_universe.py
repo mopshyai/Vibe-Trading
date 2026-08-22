@@ -22,6 +22,7 @@ if str(AGENT) not in sys.path:
     sys.path.insert(0, str(AGENT))
 
 from src.options_market.universe import fetch_us_listed_universe  # noqa: E402
+from src.trading_platform import DataPlaneManifest  # noqa: E402
 
 
 def parse_args():  # type: ignore[no-untyped-def]
@@ -29,6 +30,7 @@ def parse_args():  # type: ignore[no-untyped-def]
 
     parser = argparse.ArgumentParser(description="Refresh U.S. listed-security universe")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--manifest", type=Path, help="Optional data-plane freshness manifest")
     parser.add_argument("--exclude-etfs", action="store_true")
     parser.add_argument("--timeout", type=float, default=20.0)
     return parser.parse_args()
@@ -40,7 +42,8 @@ def main() -> int:
         include_etfs=not args.exclude_etfs,
         timeout=args.timeout,
     )
-    observed_at = datetime.now(timezone.utc).isoformat()
+    observed = datetime.now(timezone.utc)
+    observed_at = observed.isoformat()
     payload = {
         "schema_version": 1,
         "observed_at": observed_at,
@@ -50,6 +53,14 @@ def main() -> int:
         "listings": [asdict(listing) for listing in listings],
     }
     _atomic_json(args.output, payload)
+    if args.manifest:
+        DataPlaneManifest(args.manifest).mark_success(
+            "equity_universe",
+            observed_at=observed,
+            source="nasdaq_trader_symbol_directory",
+            detail=f"{len(listings)} current listings",
+            metadata={"count": len(listings), "output": str(args.output)},
+        )
     print(json.dumps({"status": "ok", "count": len(listings), "observed_at": observed_at, "output": str(args.output)}))
     return 0
 
