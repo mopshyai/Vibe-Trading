@@ -56,6 +56,9 @@ class TradingPlatformService:
         decision = _decision(dashboard.get("decision") or personal.get("decision"))
         headline = str(dashboard.get("headline") or "Trading research snapshot")
 
+        # Portfolio/account risk is a top-level veto, not another ranking feature.
+        # Preserve opportunity cards for research/audit, but never let a candidate
+        # appear account-approved when the account itself is blocked.
         if risk_summary.trading_blocked:
             decision = DeskDecision.NO_TRADE
             funnel = funnel.model_copy(update={"trade_ready": 0})
@@ -99,12 +102,17 @@ class TradingPlatformService:
 
         journal_rows = personal.get("journal_candidates")
         if not isinstance(journal_rows, list):
+            # Backward-compatible fallback for cycles created before the full
+            # evaluated-candidate journal payload existed.
             journal_rows = personal.get("candidates") if isinstance(personal.get("candidates"), list) else []
         journal_count = 0
         for raw in journal_rows:
             if not isinstance(raw, Mapping):
                 continue
-            entry = _journal_entry(raw, snapshot=snapshot)
+            entry = _journal_entry(
+                raw,
+                snapshot=snapshot,
+            )
             if entry is None:
                 continue
             self.store.append_journal_entry(entry)
@@ -115,7 +123,10 @@ class TradingPlatformService:
                     event_type="candidate_batch_journaled",
                     environment=self.environment,
                     system=self.system,
-                    payload={"snapshot_id": snapshot.snapshot_id, "candidate_count": journal_count},
+                    payload={
+                        "snapshot_id": snapshot.snapshot_id,
+                        "candidate_count": journal_count,
+                    },
                 )
             )
 
@@ -140,12 +151,19 @@ class TradingPlatformService:
         }
 
 
-def _journal_entry(raw: Mapping[str, Any], *, snapshot: TradingDeskSnapshot) -> JournalEntry | None:
+def _journal_entry(
+    raw: Mapping[str, Any],
+    *,
+    snapshot: TradingDeskSnapshot,
+) -> JournalEntry | None:
     symbol = str(raw.get("symbol") or "").strip().upper()
     if not symbol:
         return None
     decision = _decision(raw.get("decision"))
-    decision_value = None if decision is DeskDecision.NO_DATA else decision
+    if decision is DeskDecision.NO_DATA:
+        decision_value: DeskDecision | None = None
+    else:
+        decision_value = decision
     return JournalEntry(
         stage=stage_for_decision(decision_value),
         environment=snapshot.environment,
@@ -175,7 +193,11 @@ def _journal_entry(raw: Mapping[str, Any], *, snapshot: TradingDeskSnapshot) -> 
         watch_reasons=_strings(raw.get("watch_reasons")),
         data_source=_text(raw.get("data_source")),
         option_feed=_text(raw.get("option_feed")),
-        execution_grade_feed=bool(raw.get("execution_grade_feed")) if raw.get("execution_grade_feed") is not None else None,
+        execution_grade_feed=(
+            bool(raw.get("execution_grade_feed"))
+            if raw.get("execution_grade_feed") is not None
+            else None
+        ),
     )
 
 
