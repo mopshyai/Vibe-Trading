@@ -11,6 +11,7 @@ on:
       - "frontend/src/lib/tradingDesk.ts"
       - "frontend/src/pages/TradingDesk.tsx"
       - "frontend/src/router.tsx"
+      - "frontend/src/components/layout/Layout.tsx"
       - "scripts/publish_trading_desk.py"
       - ".github/workflows/trading-platform-ci.yml"
   workflow_dispatch:
@@ -29,8 +30,10 @@ jobs:
           cache: pip
       - name: Install targeted dependencies
         run: python -m pip install --upgrade pip pytest pydantic duckdb
-      - name: Compile platform modules
-        run: python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py
+      - name: Compile platform modules and API assembler
+        run: |
+          python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py
+          python -m py_compile agent/api_server.py
       - name: Run platform tests
         env:
           PYTHONPATH: agent
