@@ -1,7 +1,13 @@
 """Personal trading-platform foundation."""
 
+from .data_manifest import DataPlaneManifest
 from .health import DEFAULT_FRESHNESS_POLICIES, FreshnessPolicy, evaluate_data_freshness
 from .journal import JournalEntry, JournalStage, stage_for_decision
+from .market_calendar import (
+    MarketCalendarDependencyError,
+    xnys_session_calendar,
+    xnys_trading_session,
+)
 from .models import (
     ComponentHealth,
     DataQualitySummary,
@@ -22,6 +28,7 @@ from .store import TradingPlatformStore
 __all__ = [
     "ComponentHealth",
     "DEFAULT_FRESHNESS_POLICIES",
+    "DataPlaneManifest",
     "DataQualitySummary",
     "DeskDecision",
     "ExecutionMode",
@@ -30,6 +37,7 @@ __all__ = [
     "HealthStatus",
     "JournalEntry",
     "JournalStage",
+    "MarketCalendarDependencyError",
     "OpportunityCard",
     "PlatformEnvironment",
     "PlatformEvent",
@@ -40,4 +48,6 @@ __all__ = [
     "TradingPlatformStore",
     "evaluate_data_freshness",
     "stage_for_decision",
+    "xnys_session_calendar",
+    "xnys_trading_session",
 ]
