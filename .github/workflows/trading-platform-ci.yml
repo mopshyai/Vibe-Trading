@@ -31,6 +31,7 @@ on:
       - "scripts/refresh_focused_options.py"
       - "scripts/refresh_catalysts.py"
       - "scripts/backfill_us_market_data.py"
+      - "scripts/build_historical_option_outcomes.py"
       - "scripts/build_options_evidence.py"
       - "scripts/assess_account_risk.py"
       - "scripts/run_personal_options_assistant.py"
@@ -66,7 +67,7 @@ jobs:
       - name: Compile platform modules and operational CLIs
         run: |
           python -m compileall -q agent/src/trading_platform agent/src/api/trading_platform_routes.py agent/src/options_market/paper_execution.py agent/src/options_market/personal_service.py agent/src/options_market/evidence_artifacts.py agent/src/options_market/catalyst_store.py agent/src/options_market/alpaca_news.py
-          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/build_options_evidence.py scripts/assess_account_risk.py scripts/run_personal_options_assistant.py scripts/run_continuous_options_analysis.py scripts/run_paper_option_lifecycle.py scripts/run_trading_platform_worker.py scripts/start_trading_platform.py scripts/trading_platform_preflight.py
+          python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/build_historical_option_outcomes.py scripts/build_options_evidence.py scripts/assess_account_risk.py scripts/run_personal_options_assistant.py scripts/run_continuous_options_analysis.py scripts/run_paper_option_lifecycle.py scripts/run_trading_platform_worker.py scripts/start_trading_platform.py scripts/trading_platform_preflight.py
       - name: Run platform, evidence, catalyst, paper and personal-decision tests
         env:
           PYTHONPATH: agent
