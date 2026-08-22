@@ -1,9 +1,9 @@
 """Personal-account research decision layer for the U.S. options stack.
 
 The layer turns an institutional-style shortlist into a small, explainable set of
-personal research decisions.  It never places an order.  ``TRADE_READY_RESEARCH``
-means every configured research/risk gate passed; actual broker execution remains
-behind the separate paper/live execution boundary.
+personal research decisions. It never places an order. ``TRADE_READY_RESEARCH``
+means every configured research/risk/data gate passed; actual broker execution
+remains behind the separate paper/live execution boundary.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ class PersonalDecisionConfig:
     max_contracts_per_trade: int = 1
     require_positive_ev: bool = True
     require_walk_forward_pass: bool = True
+    require_execution_grade_option_data: bool = True
     allow_watch_when_calibration_missing: bool = True
 
     def validate(self) -> None:
@@ -71,15 +72,20 @@ def evaluate_personal_candidate(
 
     ranking = _score(candidate.get("ranking_score") or candidate.get("score"))
     direction = str(candidate.get("direction") or "").strip().lower()
-    catalyst = _score_or_none(catalyst_score if catalyst_score is not None else candidate.get("catalyst_score"))
+    catalyst = _score_or_none(
+        catalyst_score if catalyst_score is not None else candidate.get("catalyst_score")
+    )
 
-    quality = dict(option_quality_report or assess_option_quality(
-        candidate,
-        catalyst_score=catalyst,
-        realized_vol_pct=realized_vol_pct,
-        iv_percentile=iv_percentile,
-        config=option_quality_config,
-    ))
+    quality = dict(
+        option_quality_report
+        or assess_option_quality(
+            candidate,
+            catalyst_score=catalyst,
+            realized_vol_pct=realized_vol_pct,
+            iv_percentile=iv_percentile,
+            config=option_quality_config,
+        )
+    )
     quality_score = _score(quality.get("quality_score"))
 
     regime = dict(regime_report or {"regime": "unknown", "confidence": 0.0})
@@ -111,6 +117,10 @@ def evaluate_personal_candidate(
         hard_reasons.append("option_quality_failed")
     if regime_score < cfg.min_regime_fit_score:
         hard_reasons.append("market_regime_strongly_conflicts")
+
+    execution_grade = candidate.get("execution_grade_feed")
+    if cfg.require_execution_grade_option_data and execution_grade is False:
+        watch_reasons.append("option_feed_not_execution_grade")
 
     if cfg.require_positive_ev:
         if not ev_present:
@@ -175,6 +185,12 @@ def evaluate_personal_candidate(
         "entry_ask": candidate.get("entry_ask"),
         "max_loss_usd_per_contract": candidate.get("max_loss_usd"),
         "max_contracts_within_configured_single_trade_risk": max_contracts,
+        "data_quality": {
+            "source": candidate.get("data_source"),
+            "option_feed": candidate.get("option_feed"),
+            "execution_grade_feed": execution_grade,
+            "warnings": candidate.get("data_warnings") or [],
+        },
         "hard_reasons": _dedupe(hard_reasons),
         "watch_reasons": _dedupe(watch_reasons),
         "option_quality": quality,
@@ -185,8 +201,8 @@ def evaluate_personal_candidate(
         "risk": risk,
         "config": asdict(cfg),
         "interpretation": (
-            "Research decision only. TRADE_READY_RESEARCH means configured evidence and risk gates passed; "
-            "it is not an instruction, guarantee, or automatic broker order."
+            "Research decision only. TRADE_READY_RESEARCH means configured evidence, data-quality and risk gates "
+            "passed; it is not an instruction, guarantee, or automatic broker order."
         ),
     }
 
@@ -237,7 +253,12 @@ def build_personal_shortlist(
         )
 
     priority = {"TRADE_READY_RESEARCH": 0, "WATCH": 1, "PASS": 2}
-    evaluated.sort(key=lambda row: (priority.get(str(row["decision"]), 9), -float(row["composite_score"])))
+    evaluated.sort(
+        key=lambda row: (
+            priority.get(str(row["decision"]), 9),
+            -float(row["composite_score"]),
+        )
+    )
 
     trade_ready_seen = 0
     visible: list[dict[str, Any]] = []
@@ -245,7 +266,11 @@ def build_personal_shortlist(
         if row["decision"] == "TRADE_READY_RESEARCH":
             trade_ready_seen += 1
             if trade_ready_seen > cfg.max_trade_ready_candidates:
-                row = {**row, "decision": "WATCH", "watch_reasons": [*row["watch_reasons"], "daily_trade_ready_cap"]}
+                row = {
+                    **row,
+                    "decision": "WATCH",
+                    "watch_reasons": [*row["watch_reasons"], "daily_trade_ready_cap"],
+                }
         if len(visible) < cfg.max_display_candidates:
             visible.append(row)
 
@@ -275,7 +300,11 @@ def _evidence_score(ev: Mapping[str, Any], walk: Mapping[str, Any]) -> float:
         return 30.0
     lower = _finite(ev.get("lower_confidence_bound_pct")) or 0.0
     hit = _finite(ev.get("empirical_target_hit_rate")) or 0.0
-    ev_base = 50.0 + max(-35.0, min(35.0, lower * 1.5)) + min(15.0, max(0.0, hit) * 50.0)
+    ev_base = (
+        50.0
+        + max(-35.0, min(35.0, lower * 1.5))
+        + min(15.0, max(0.0, hit) * 50.0)
+    )
     if bool(ev.get("positive_ev")):
         ev_base += 10.0
     if walk.get("decision") == "WALK_FORWARD_PASS":
