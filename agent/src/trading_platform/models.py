@@ -109,9 +109,13 @@ class RiskSummary(StrictModel):
     open_premium_risk_usd: float | None = Field(default=None, ge=0)
     open_premium_risk_pct: float | None = Field(default=None, ge=0)
     daily_realized_pnl_usd: float | None = None
+    weekly_realized_pnl_usd: float | None = None
+    max_drawdown_pct: float | None = Field(default=None, ge=0)
     positions: int = Field(default=0, ge=0)
     trading_blocked: bool = False
     blocking_reasons: list[str] = Field(default_factory=list)
+    greeks: dict[str, Any] = Field(default_factory=dict)
+    concentration: dict[str, Any] = Field(default_factory=dict)
 
 
 class OpportunityCard(StrictModel):
@@ -171,7 +175,6 @@ class PlatformEvent(StrictModel):
     environment: PlatformEnvironment
     system: SystemIdentity
     payload: dict[str, Any] = Field(default_factory=dict)
-
 
 
 def normalize_mapping(value: Mapping[str, Any] | None) -> dict[str, Any]:

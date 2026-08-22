@@ -51,19 +51,31 @@ class TradingPlatformService:
         dashboard = _mapping(cycle.get("dashboard"))
         state = _mapping(market.get("state"))
         plan = _mapping(market.get("plan"))
+        risk_summary = risk or RiskSummary()
+        funnel = _funnel(dashboard.get("funnel"))
+        decision = _decision(dashboard.get("decision") or personal.get("decision"))
+        headline = str(dashboard.get("headline") or "Trading research snapshot")
+
+        # Portfolio/account risk is a top-level veto, not another ranking feature.
+        # Preserve opportunity cards for research/audit, but never let a candidate
+        # appear account-approved when the account itself is blocked.
+        if risk_summary.trading_blocked:
+            decision = DeskDecision.NO_TRADE
+            funnel = funnel.model_copy(update={"trade_ready": 0})
+            headline = "NO TRADE — account risk gate blocked additional exposure"
 
         snapshot = TradingDeskSnapshot(
             environment=self.environment,
             execution_mode=_execution_mode(self.environment),
-            decision=_decision(dashboard.get("decision") or personal.get("decision")),
-            headline=str(dashboard.get("headline") or "Trading research snapshot"),
+            decision=decision,
+            headline=headline,
             system=self.system,
             market_phase=str(plan.get("phase") or state.get("latest_phase") or "unknown"),
             market_regime=str(dashboard.get("market_regime") or "unknown"),
             market_regime_confidence=_bounded01(dashboard.get("market_regime_confidence")),
-            funnel=_funnel(dashboard.get("funnel")),
+            funnel=funnel,
             opportunities=_opportunities(dashboard.get("cards")),
-            risk=risk or RiskSummary(),
+            risk=risk_summary,
             data_quality=data_quality or DataQualitySummary(),
             source_cycle=_nonnegative_int(state.get("cycle")),
             warnings=_warnings(cycle, dashboard),
@@ -82,6 +94,8 @@ class TradingPlatformService:
                     "opportunity_count": len(snapshot.opportunities),
                     "data_healthy": snapshot.data_quality.healthy,
                     "execution_mode": snapshot.execution_mode.value,
+                    "account_risk_blocked": snapshot.risk.trading_blocked,
+                    "account_risk_reasons": list(snapshot.risk.blocking_reasons),
                 },
             )
         )

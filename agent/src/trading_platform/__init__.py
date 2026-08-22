@@ -22,10 +22,16 @@ from .models import (
     SystemIdentity,
     TradingDeskSnapshot,
 )
+from .portfolio_risk import (
+    AccountRiskConfig,
+    assess_account_portfolio_risk,
+    risk_summary_from_report,
+)
 from .service import TradingPlatformService
 from .store import TradingPlatformStore
 
 __all__ = [
+    "AccountRiskConfig",
     "ComponentHealth",
     "DEFAULT_FRESHNESS_POLICIES",
     "DataPlaneManifest",
@@ -46,7 +52,9 @@ __all__ = [
     "TradingDeskSnapshot",
     "TradingPlatformService",
     "TradingPlatformStore",
+    "assess_account_portfolio_risk",
     "evaluate_data_freshness",
+    "risk_summary_from_report",
     "stage_for_decision",
     "xnys_session_calendar",
     "xnys_trading_session",
