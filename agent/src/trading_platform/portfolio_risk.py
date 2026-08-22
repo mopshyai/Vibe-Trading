@@ -76,10 +76,10 @@ def assess_account_portfolio_risk(
 ) -> dict[str, Any]:
     """Aggregate account risk and fail closed on configured breaches.
 
-    Position input is intentionally tolerant of common broker/research field
-    names. For option premium risk, total ``premium_risk_usd`` or broker
-    ``cost_basis`` is preferred. If neither is available, ``avg_entry_price`` is
-    multiplied by quantity and the contract multiplier.
+    For option premium risk, total ``premium_risk_usd`` or broker ``cost_basis``
+    is preferred. Ordinary equity cost basis is *not* treated as option premium
+    at risk. Equity holdings remain in normalized account state for future beta
+    and cross-asset analysis but do not trigger long-option premium limits.
     """
     cfg = config or AccountRiskConfig()
     cfg.validate()
@@ -95,17 +95,18 @@ def assess_account_portfolio_risk(
         if row is not None:
             normalized.append(row)
 
+    option_positions = [row for row in normalized if row["asset_class"] == "option"]
     reasons: list[str] = []
     warnings: list[str] = []
     if cfg.require_complete_premium_risk:
         missing = [
             row["contract_symbol"] or row["underlying"]
-            for row in normalized
+            for row in option_positions
             if row["premium_risk_usd"] is None
         ]
         if missing:
             reasons.append("incomplete_position_premium_risk")
-            warnings.append(f"Missing premium-risk basis for {len(missing)} position(s).")
+            warnings.append(f"Missing premium-risk basis for {len(missing)} option position(s).")
     if normalization_errors:
         warnings.extend(normalization_errors)
         if cfg.block_unsupported_short_options and any(
@@ -113,12 +114,12 @@ def assess_account_portfolio_risk(
         ):
             reasons.append("unsupported_short_option_exposure")
 
-    risk_rows = [row for row in normalized if row["premium_risk_usd"] is not None]
+    risk_rows = [row for row in option_positions if row["premium_risk_usd"] is not None]
     total_risk = sum(float(row["premium_risk_usd"]) for row in risk_rows)
     total_risk_pct = total_risk / equity * 100.0
     if total_risk_pct > cfg.max_total_premium_risk_pct:
         reasons.append("total_open_premium_risk_limit")
-    if len(normalized) > cfg.max_positions:
+    if len(option_positions) > cfg.max_positions:
         reasons.append("max_positions")
 
     by_underlying = _risk_buckets(risk_rows, "underlying", equity)
@@ -132,7 +133,7 @@ def assess_account_portfolio_risk(
     if any(row["risk_pct"] > cfg.max_expiry_risk_pct for row in by_expiry):
         reasons.append("expiry_concentration_limit")
 
-    greeks = _aggregate_greeks(normalized, equity)
+    greeks = _aggregate_greeks(option_positions, equity)
     daily_loss_pct = _loss_pct(daily_realized_pnl_usd, equity)
     weekly_loss_pct = _loss_pct(weekly_realized_pnl_usd, equity)
     if daily_loss_pct is not None and daily_loss_pct > cfg.max_daily_loss_pct:
@@ -165,6 +166,7 @@ def assess_account_portfolio_risk(
         "warnings": _dedupe(warnings),
         "account_equity_usd": round(equity, 2),
         "position_count": len(normalized),
+        "option_position_count": len(option_positions),
         "positions_with_known_premium_risk": len(risk_rows),
         "open_premium_risk_usd": round(total_risk, 2),
         "open_premium_risk_pct": round(total_risk_pct, 4),
@@ -214,7 +216,9 @@ def _normalize_position(
 ) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     symbol = str(raw.get("symbol") or raw.get("contract_symbol") or "").strip().upper()
-    contract_symbol = str(raw.get("contract_symbol") or symbol or "").strip().upper() or None
+    explicit_contract = str(raw.get("contract_symbol") or "").strip().upper()
+    candidate_contract = explicit_contract or (symbol if _OCC_RE.fullmatch(symbol) else "")
+    contract_symbol = candidate_contract or None
     occ = _parse_occ(contract_symbol)
     underlying = str(
         raw.get("underlying") or (occ or {}).get("underlying") or symbol
@@ -232,8 +236,9 @@ def _normalize_position(
     is_short = quantity < 0 or side in {"short", "sell", "short_sell"}
     quantity_abs = abs(quantity)
     asset_class = str(
-        raw.get("asset_class") or ("option" if occ or raw.get("option_type") else "unknown")
-    ).lower()
+        raw.get("asset_class")
+        or ("option" if occ or raw.get("option_type") else "equity")
+    ).strip().lower()
     if asset_class == "option" and is_short:
         errors.append(f"position_{index}:short_option_requires_defined_max_loss")
 
@@ -243,15 +248,15 @@ def _normalize_position(
     expiration = _expiration_text(raw.get("expiration") or (occ or {}).get("expiration"))
     multiplier = _positive(raw.get("multiplier")) or (100.0 if asset_class == "option" else 1.0)
 
-    premium_risk = _nonnegative(raw.get("premium_risk_usd"))
-    if premium_risk is None:
-        # Alpaca's position cost_basis is already the total basis for the position.
+    premium_risk = _nonnegative(raw.get("premium_risk_usd") or raw.get("risk_usd"))
+    if asset_class == "option" and premium_risk is None:
+        # Alpaca's option position cost_basis is already total basis for the position.
         premium_risk = _abs_finite(raw.get("cost_basis"))
-    if premium_risk is None and not is_short:
+    if asset_class == "option" and premium_risk is None and not is_short:
         per_contract_loss = _positive(raw.get("max_loss_usd_per_contract"))
         if per_contract_loss is not None:
             premium_risk = per_contract_loss * quantity_abs
-    if premium_risk is None and not is_short:
+    if asset_class == "option" and premium_risk is None and not is_short:
         avg_entry = _positive(
             raw.get("avg_entry_price")
             or raw.get("average_cost")
