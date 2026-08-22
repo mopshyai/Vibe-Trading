@@ -221,7 +221,13 @@ def build_personal_shortlist(
     config: PersonalDecisionConfig | None = None,
     risk_config: PortfolioRiskConfig | None = None,
 ) -> dict[str, Any]:
-    """Reduce a research shortlist to at most a few personal decision cards."""
+    """Reduce a research shortlist while retaining every evaluated candidate.
+
+    ``candidates`` remains the small UI-facing shortlist. ``journal_candidates``
+    is a compact policy-adjusted record of every evaluated candidate so later
+    attribution can learn from rejected and missed opportunities, not only
+    displayed or executed trades.
+    """
     cfg = config or PersonalDecisionConfig()
     cfg.validate()
     ev_reports = ev_reports or {}
@@ -260,20 +266,22 @@ def build_personal_shortlist(
         )
     )
 
+    # Apply the personal trade-ready cap to the complete evaluated set, not just
+    # the UI-visible rows. This keeps the journal and dashboard policy-consistent.
+    policy_evaluated: list[dict[str, Any]] = []
     trade_ready_seen = 0
-    visible: list[dict[str, Any]] = []
-    for row in evaluated:
+    for source in evaluated:
+        row = dict(source)
         if row["decision"] == "TRADE_READY_RESEARCH":
             trade_ready_seen += 1
             if trade_ready_seen > cfg.max_trade_ready_candidates:
-                row = {
-                    **row,
-                    "decision": "WATCH",
-                    "watch_reasons": [*row["watch_reasons"], "daily_trade_ready_cap"],
-                }
-        if len(visible) < cfg.max_display_candidates:
-            visible.append(row)
+                row["decision"] = "WATCH"
+                row["watch_reasons"] = _dedupe(
+                    [*list(row.get("watch_reasons") or []), "daily_trade_ready_cap"]
+                )
+        policy_evaluated.append(row)
 
+    visible = policy_evaluated[: cfg.max_display_candidates]
     ready = [row for row in visible if row["decision"] == "TRADE_READY_RESEARCH"]
     watches = [row for row in visible if row["decision"] == "WATCH"]
     overall = "TRADE_READY_RESEARCH" if ready else ("WATCH" if watches else "NO_TRADE")
@@ -282,14 +290,54 @@ def build_personal_shortlist(
         "decision": overall,
         "trade_ready_count": len(ready),
         "watch_count": len(watches),
-        "candidate_count_evaluated": len(evaluated),
+        "candidate_count_evaluated": len(policy_evaluated),
         "candidates": visible,
+        "journal_candidates": [
+            _journal_projection(row, displayed=index < cfg.max_display_candidates)
+            for index, row in enumerate(policy_evaluated)
+        ],
         "regime": dict(regime_report or {"regime": "unknown"}),
         "config": asdict(cfg),
         "warning": (
             "Personal research layer only. It is deliberately selective and may return NO_TRADE. "
             "Historical evidence can fail in future regimes; broker execution is separate."
         ),
+    }
+
+
+def _journal_projection(row: Mapping[str, Any], *, displayed: bool) -> dict[str, Any]:
+    """Return a compact, JSON-friendly evaluation record for the audit journal."""
+    ev = row.get("empirical_ev") if isinstance(row.get("empirical_ev"), Mapping) else {}
+    risk = row.get("risk") if isinstance(row.get("risk"), Mapping) else {}
+    data_quality = row.get("data_quality") if isinstance(row.get("data_quality"), Mapping) else {}
+    return {
+        "symbol": row.get("symbol"),
+        "contract_symbol": row.get("contract_symbol"),
+        "decision": row.get("decision"),
+        "displayed": displayed,
+        "direction": row.get("direction"),
+        "option_type": row.get("option_type"),
+        "composite_score": row.get("composite_score"),
+        "ranking_score": row.get("ranking_score"),
+        "option_quality_score": row.get("option_quality_score"),
+        "regime_fit_score": row.get("regime_fit_score"),
+        "evidence_score": row.get("evidence_score"),
+        "catalyst_score": row.get("catalyst_score"),
+        "target_profit_pct": row.get("target_profit_pct"),
+        "target_multiple": row.get("target_multiple"),
+        "entry_ask": row.get("entry_ask"),
+        "max_loss_usd_per_contract": row.get("max_loss_usd_per_contract"),
+        "contract_cap": row.get("max_contracts_within_configured_single_trade_risk"),
+        "hard_reasons": list(row.get("hard_reasons") or []),
+        "watch_reasons": list(row.get("watch_reasons") or []),
+        "ev_samples": ev.get("samples"),
+        "expected_return_pct": ev.get("expected_return_pct"),
+        "lower_confidence_bound_pct": ev.get("lower_confidence_bound_pct"),
+        "empirical_target_hit_rate": ev.get("empirical_target_hit_rate"),
+        "risk_approved": risk.get("approved"),
+        "data_source": data_quality.get("source"),
+        "option_feed": data_quality.get("option_feed"),
+        "execution_grade_feed": data_quality.get("execution_grade_feed"),
     }
 
 
