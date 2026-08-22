@@ -76,13 +76,19 @@ def combine_rankings(
             rejected.append({"symbol": symbol, "reason": "chart_score_below_gate"})
             continue
 
-        expected_option_type = "call" if str(chart.get("direction")) == "bullish" else "put"
+        direction = str(chart.get("direction") or "").strip().lower()
+        if direction not in {"bullish", "bearish"}:
+            rejected.append({"symbol": symbol, "reason": "invalid_chart_direction"})
+            continue
+        expected_option_type = "call" if direction == "bullish" else "put"
         contracts = options_by_symbol.get(symbol, ())
         matched = 0
+        eligible = 0
         for option in contracts:
             if str(option.get("option_type") or "").lower() != expected_option_type:
                 continue
-            if float(option.get("target_profit_pct", cfg.target_profit_pct)) != cfg.target_profit_pct:
+            target_profit = _positive_float(option.get("target_profit_pct"), default=cfg.target_profit_pct)
+            if target_profit != cfg.target_profit_pct:
                 continue
             matched += 1
             option_score = _score(option.get("score"))
@@ -91,12 +97,12 @@ def combine_rankings(
                 continue
             if move_ratio > cfg.max_required_move_vs_one_sigma:
                 continue
+            eligible += 1
 
-            catalyst = catalyst_scores.get(symbol)
+            catalyst = _bounded_score_or_none(catalyst_scores.get(symbol))
             if catalyst is None:
                 ranking_score = cfg.chart_weight * chart_score + cfg.option_weight * option_score
             else:
-                catalyst = min(100.0, max(0.0, float(catalyst)))
                 ranking_score = (
                     cfg.chart_weight_with_catalyst * chart_score
                     + cfg.option_weight_with_catalyst * option_score
@@ -133,6 +139,8 @@ def combine_rankings(
 
         if matched == 0:
             rejected.append({"symbol": symbol, "reason": f"no_{expected_option_type}_contracts_for_direction"})
+        elif eligible == 0:
+            rejected.append({"symbol": symbol, "reason": "directional_contracts_failed_option_gates"})
 
     accepted.sort(
         key=lambda row: (
@@ -176,6 +184,16 @@ def _positive_float(value: object, *, default: float) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     return result if result >= 0 else default
+
+
+def _bounded_score_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return min(100.0, max(0.0, result))
 
 
 __all__ = ["OptionsMarketPipelineConfig", "combine_rankings"]
