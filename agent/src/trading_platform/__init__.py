@@ -1,5 +1,6 @@
 """Personal trading-platform foundation."""
 
+from .attribution import AttributionConfig, build_attribution_report, checkpoint_candidate_outcomes
 from .data_manifest import DataPlaneManifest
 from .exit_manager import ExitPolicyConfig, evaluate_long_option_exit, scan_long_option_exits
 from .health import DEFAULT_FRESHNESS_POLICIES, FreshnessPolicy, evaluate_data_freshness
@@ -43,6 +44,7 @@ from .store import TradingPlatformStore
 
 __all__ = [
     "AccountRiskConfig",
+    "AttributionConfig",
     "ComponentHealth",
     "DEFAULT_FRESHNESS_POLICIES",
     "DataPlaneManifest",
@@ -67,6 +69,8 @@ __all__ = [
     "TradingPlatformStore",
     "append_reconciled_order_status",
     "assess_account_portfolio_risk",
+    "build_attribution_report",
+    "checkpoint_candidate_outcomes",
     "evaluate_data_freshness",
     "evaluate_long_option_exit",
     "fetch_alpaca_market_clock",
