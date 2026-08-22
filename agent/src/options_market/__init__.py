@@ -7,6 +7,11 @@ from .chart_screen import (
     rank_chart_snapshots,
     scan_market_frames,
 )
+from .databento_adapter import (
+    DatabentoHistoricalAdapter,
+    DatabentoHistoricalConfig,
+    OSIContract,
+)
 from .outcomes import OutcomeConfig, calibrate_score_buckets, label_long_option_path
 from .pipeline import OptionsMarketPipelineConfig, combine_rankings
 from .store import OptionsResearchStore
@@ -15,6 +20,9 @@ from .universe import USListing, fetch_us_listed_universe, parse_symbol_director
 __all__ = [
     "ChartScreenConfig",
     "ChartSnapshot",
+    "DatabentoHistoricalAdapter",
+    "DatabentoHistoricalConfig",
+    "OSIContract",
     "OptionsMarketPipelineConfig",
     "OptionsResearchStore",
     "OutcomeConfig",
