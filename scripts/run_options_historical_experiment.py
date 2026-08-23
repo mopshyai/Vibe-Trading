@@ -9,6 +9,7 @@ universe mode before running a potentially large local replay.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -131,9 +132,9 @@ def main() -> int:
         "universe_mode": "static_explicitly_allowed" if static_symbols is not None else "point_in_time_snapshots",
         "static_symbol_count": None if static_symbols is None else len(static_symbols),
         "universe_snapshot_count": None if snapshots is None else len(snapshots),
-        "replay_config": replay_cfg.__dict__,
-        "experiment_config": experiment_cfg.__dict__,
-        "lineage": lineage.__dict__,
+        "replay_config": asdict(replay_cfg),
+        "experiment_config": asdict(experiment_cfg),
+        "lineage": asdict(lineage),
         "provider_network_requests": False,
         "broker_mutation": False,
     }
@@ -167,14 +168,24 @@ def _research_schedule(
     cadence_sessions: int,
     minutes_before_close: int,
 ) -> list[datetime]:
+    if cadence_sessions < 1:
+        raise ValueError("cadence_sessions must be at least 1")
+    if minutes_before_close < 1:
+        raise ValueError("minutes_before_close must be positive")
     calendar = xnys_session_calendar(start, end)
     sessions: list[datetime] = []
     for day in sorted(calendar):
         row = calendar[day]
         if not bool(row.get("trading_day")):
             continue
+        open_at = _aware(str(row.get("open")), f"calendar open {day}")
         close = _aware(str(row.get("close")), f"calendar close {day}")
-        sessions.append(close - timedelta(minutes=minutes_before_close))
+        research_time = close - timedelta(minutes=minutes_before_close)
+        if research_time < open_at:
+            raise ValueError(
+                f"minutes-before-close={minutes_before_close} places research time before XNYS open on {day}"
+            )
+        sessions.append(research_time)
     return sessions[::cadence_sessions]
 
 
