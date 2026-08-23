@@ -38,6 +38,11 @@ function fmtMoney(value: number | null | undefined) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
 }
 
+function fmtRatio(value: number | null | undefined, digits = 2) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(digits)}×`;
+}
+
 function decisionClass(decision: DeskDecision) {
   if (decision === "TRADE_READY_RESEARCH") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-500";
   if (decision === "WATCH") return "border-amber-500/30 bg-amber-500/10 text-amber-500";
@@ -68,6 +73,14 @@ function MetricCard({ label, value, detail, icon: Icon }: { label: string; value
 
 function Opportunity({ item, index }: { item: TradingDeskOpportunity; index: number }) {
   const reasons = item.decision === "PASS" ? item.hard_reasons : item.watch_reasons;
+  const hasSurface = [
+    item.surface_efficiency_score,
+    item.surface_required_move_ratio,
+    item.surface_atm_expected_move_pct,
+    item.candidate_iv_premium_to_atm_points,
+  ].some((value) => value != null)
+    || Boolean(item.surface_term_structure_state || item.surface_skew_state || item.surface_implied_vs_realized_state);
+
   return (
     <div className="rounded-xl border border-border/70 bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -102,6 +115,27 @@ function Opportunity({ item, index }: { item: TradingDeskOpportunity; index: num
         <Small label="Target hit rate" value={item.historical_target_hit_rate == null ? "—" : fmtPct(item.historical_target_hit_rate * 100)} />
         <Small label="Spread / IV pctile" value={`${fmtPct(item.spread_pct)} / ${fmtNumber(item.iv_percentile, 0)}`} />
       </div>
+
+      {hasSurface && (
+        <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Volatility surface</div>
+            <div className="text-[10px] text-muted-foreground">relative contract context · not probability</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+            <Small label="Efficiency" value={fmtNumber(item.surface_efficiency_score, 1)} />
+            <Small label="Move / ATM exp." value={fmtRatio(item.surface_required_move_ratio)} />
+            <Small label="ATM exp. move" value={fmtPct(item.surface_atm_expected_move_pct)} />
+            <Small
+              label="IV vs ATM"
+              value={item.candidate_iv_premium_to_atm_points == null ? "—" : `${item.candidate_iv_premium_to_atm_points >= 0 ? "+" : ""}${item.candidate_iv_premium_to_atm_points.toFixed(1)} vol pts`}
+            />
+            <Small label="Term" value={item.surface_term_structure_state || "—"} />
+            <Small label="Skew" value={item.surface_skew_state || "—"} />
+            <Small label="IV vs RV" value={item.surface_implied_vs_realized_state || "—"} />
+          </div>
+        </div>
+      )}
 
       {reasons.length > 0 && (
         <div className="mt-4 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
@@ -173,7 +207,7 @@ export function TradingDesk() {
             </div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight">Trading Desk</h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Whole-market research → evidence → options quality → risk → paper approval. Live execution remains disabled.
+              Whole-market research → volatility surface → evidence → risk → paper approval. Live execution remains disabled.
             </p>
           </div>
           <div className="flex items-center gap-2">
