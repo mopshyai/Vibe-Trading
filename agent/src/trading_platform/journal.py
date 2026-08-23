@@ -57,6 +57,14 @@ class JournalEntry(BaseModel):
     regime_fit_score: float | None = Field(default=None, ge=0, le=100)
     evidence_score: float | None = Field(default=None, ge=0, le=100)
     catalyst_score: float | None = Field(default=None, ge=0, le=100)
+    surface_efficiency_score: float | None = Field(default=None, ge=0, le=100)
+    surface_required_move_ratio: float | None = Field(default=None, ge=0)
+    surface_iv_percentile: float | None = Field(default=None, ge=0, le=100)
+    candidate_iv_premium_to_atm_points: float | None = None
+    surface_atm_expected_move_pct: float | None = Field(default=None, ge=0)
+    surface_term_structure_state: str | None = None
+    surface_skew_state: str | None = None
+    surface_implied_vs_realized_state: str | None = None
     expected_return_pct: float | None = None
     lower_confidence_bound_pct: float | None = None
     empirical_target_hit_rate: float | None = Field(default=None, ge=0, le=1)
