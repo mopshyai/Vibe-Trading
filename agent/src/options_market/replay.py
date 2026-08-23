@@ -242,7 +242,14 @@ def _score_store_quote(
     ask = _positive(row.get("ask"))
     iv = _positive(row.get("implied_volatility"))
     expiration = _parse_time(row.get("expiration"))
-    if strike is None or bid is None or ask is None or ask < bid or iv is None or expiration is None:
+    if strike is None or bid is None or ask is None or ask < bid or expiration is None:
+        return None, warnings
+    if iv is None:
+        # Historical OPRA CBBO from the current Databento adapter does not carry
+        # implied volatility. Reject the contract, but make the data limitation
+        # explicit so the session cannot be misread as an ordinary strategy
+        # NO_TRADE decision.
+        warnings.append("historical_implied_volatility_missing")
         return None, warnings
     dte = max(0, int(math.ceil((expiration - as_of).total_seconds() / 86400.0)))
     if not config.min_dte <= dte <= config.max_dte:
