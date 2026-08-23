@@ -11,13 +11,14 @@ do not automatically change strategy or risk policy.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
 from statistics import median
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
@@ -56,6 +57,7 @@ class ExperimentLineage:
     risk_policy_version: str = "personal-risk-v0.1"
     payoff_policy_version: str = "adaptive-payoff-v0.1"
     commit_sha: str | None = None
+    data_snapshot_id: str | None = None
 
 
 def run_historical_research_experiment(
@@ -100,12 +102,15 @@ def run_historical_research_experiment(
         experiment_config=cfg,
         lineage=identity,
         universe_mode=resolver.mode,
+        universe_fingerprint=resolver.fingerprint,
     )
 
     sessions: list[dict[str, Any]] = []
     selected: list[dict[str, Any]] = []
     skipped_sessions: list[dict[str, str]] = []
     completeness_warnings: set[str] = set(resolver.warnings)
+    if not identity.data_snapshot_id:
+        completeness_warnings.add("data_snapshot_id_missing_reproducibility_weaker")
 
     for research_time in times:
         universe, universe_meta = resolver.resolve(research_time)
@@ -176,6 +181,7 @@ def run_historical_research_experiment(
         "created_as_of": evaluation.isoformat(),
         "lineage": asdict(identity),
         "universe_mode": resolver.mode,
+        "universe_fingerprint": resolver.fingerprint,
         "survivorship_bias_control": {
             "point_in_time_universe": resolver.mode == "point_in_time_snapshots",
             "static_universe_explicitly_allowed": resolver.mode == "static_explicitly_allowed",
@@ -280,7 +286,12 @@ class _UniverseResolver:
         self.warnings: list[str] = []
         for index, raw in enumerate(snapshots or []):
             available_at = _timestamp(raw.get("available_at"))
-            symbols = _symbols(raw.get("symbols") if isinstance(raw.get("symbols"), Sequence) and not isinstance(raw.get("symbols"), (str, bytes)) else [])
+            raw_symbols = raw.get("symbols")
+            symbols = _symbols(
+                raw_symbols
+                if isinstance(raw_symbols, Sequence) and not isinstance(raw_symbols, (str, bytes))
+                else []
+            )
             if available_at is None or not symbols:
                 raise ValueError(f"universe snapshot {index} requires timezone-aware available_at and non-empty symbols")
             self._snapshots.append((available_at, symbols, _text(raw.get("source"))))
@@ -299,6 +310,27 @@ class _UniverseResolver:
             self.warnings.append("static_universe_survivorship_bias_possible")
         else:
             raise ValueError("point-in-time universe snapshots are required unless an explicitly allowed static universe is supplied")
+        self.fingerprint = self._fingerprint()
+
+    def _fingerprint(self) -> str:
+        if self.mode == "static_explicitly_allowed":
+            payload: Any = {"mode": self.mode, "symbols": self._static}
+        else:
+            payload = {
+                "mode": self.mode,
+                "snapshots": [
+                    {
+                        "available_at": available_at.isoformat(),
+                        "symbols": symbols,
+                        "source": source,
+                    }
+                    for available_at, symbols, source in self._snapshots
+                ],
+            }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return f"universe_{digest[:20]}"
 
     def resolve(self, research_time: datetime) -> tuple[list[str], dict[str, Any]]:
         if self.mode == "static_explicitly_allowed":
@@ -307,16 +339,24 @@ class _UniverseResolver:
                 "available_at": None,
                 "source": "explicit_static_symbols",
                 "symbols": len(self._static),
+                "fingerprint": self.fingerprint,
             }
         eligible = [item for item in self._snapshots if item[0] <= research_time]
         if not eligible:
-            return [], {"mode": self.mode, "available_at": None, "source": None, "symbols": 0}
+            return [], {
+                "mode": self.mode,
+                "available_at": None,
+                "source": None,
+                "symbols": 0,
+                "fingerprint": self.fingerprint,
+            }
         available_at, symbols, source = eligible[-1]
         return list(symbols), {
             "mode": self.mode,
             "available_at": available_at.isoformat(),
             "source": source,
             "symbols": len(symbols),
+            "fingerprint": self.fingerprint,
         }
 
 
@@ -349,6 +389,19 @@ def _enrich_historical_surfaces(
             output.append(candidate)
             continue
         group = quotes[quotes["underlying"].astype(str).str.upper() == symbol]
+        if group.empty:
+            surface_warnings.add("historical_surface_quotes_unavailable")
+            output.append(candidate)
+            continue
+        if "implied_volatility" not in group.columns or not pd.to_numeric(
+            group["implied_volatility"], errors="coerce"
+        ).notna().any():
+            # OPRA CBBO rows from the current Databento adapter do not carry IV.
+            # Do not invent an approximation here; the experiment must expose
+            # that the historical surface dimension is unavailable.
+            surface_warnings.add("historical_implied_volatility_unavailable")
+            output.append(candidate)
+            continue
         surface_rows: list[dict[str, Any]] = []
         for _, row in group.iterrows():
             expiration = _timestamp(row.get("expiration"))
@@ -369,7 +422,8 @@ def _enrich_historical_surfaces(
                     "implied_volatility": row.get("implied_volatility"),
                     "open_interest": row.get("open_interest"),
                     # Historical quote schema does not currently preserve Greeks,
-                    # so 25-delta skew will remain explicitly unavailable here.
+                    # so 25-delta skew remains explicitly unavailable unless a
+                    # future point-in-time source adds decision-time deltas.
                     "delta": None,
                 }
             )
@@ -505,6 +559,7 @@ def _experiment_id(
     experiment_config: HistoricalExperimentConfig,
     lineage: ExperimentLineage,
     universe_mode: str,
+    universe_fingerprint: str,
 ) -> str:
     payload = {
         "research_times": [value.isoformat() for value in times],
@@ -513,8 +568,11 @@ def _experiment_id(
         "experiment_config": asdict(experiment_config),
         "lineage": asdict(lineage),
         "universe_mode": universe_mode,
+        "universe_fingerprint": universe_fingerprint,
     }
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return f"exp_{digest[:20]}"
 
 
@@ -542,8 +600,10 @@ def _score_bucket(value: object) -> str | None:
     score = _number(value)
     if score is None:
         return None
-    start = int(max(0, min(100, math.floor(score / 10.0) * 10)))
-    return f"{start:02d}_{min(100, start + 10):02d}"
+    if score >= 100.0:
+        return "90_100"
+    start = int(max(0, math.floor(score / 10.0) * 10))
+    return f"{start:02d}_{start + 10:02d}"
 
 
 def _ratio_bucket(value: object) -> str | None:
@@ -586,12 +646,11 @@ def _surface_move_bucket(value: object) -> str | None:
 
 
 def _symbols(values: Iterable[object]) -> list[str]:
+    """Normalize project symbols without discarding the store's .US lineage."""
     output: list[str] = []
     seen: set[str] = set()
     for value in values:
         symbol = str(value or "").strip().upper()
-        if symbol.endswith(".US"):
-            symbol = symbol[:-3]
         if symbol and symbol not in seen:
             seen.add(symbol)
             output.append(symbol)
