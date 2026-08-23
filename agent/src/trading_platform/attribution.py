@@ -198,7 +198,7 @@ def checkpoint_candidate_outcomes(
 def build_attribution_report(
     journal_rows: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Summarize observed outcomes by original decision and rejection reason."""
+    """Summarize observed outcomes by original decision, reasons and surface state."""
     observed: list[dict[str, Any]] = []
     for row in journal_rows:
         if str(row.get("stage") or "") != JournalStage.OUTCOME_OBSERVED.value:
@@ -213,6 +213,7 @@ def build_attribution_report(
             "samples": 0,
             "by_source_stage": [],
             "reason_attribution": [],
+            "surface_attribution": _empty_surface_attribution(),
             "missed_opportunities": 0,
             "avoided_losses": 0,
             "warning": "No mature candidate outcomes are available yet.",
@@ -220,6 +221,13 @@ def build_attribution_report(
 
     stage_groups: dict[str, list[Mapping[str, Any]]] = {}
     reason_groups: dict[str, list[Mapping[str, Any]]] = {}
+    surface_groups: dict[str, dict[str, list[Mapping[str, Any]]]] = {
+        "efficiency_bucket": {},
+        "required_move_bucket": {},
+        "term_structure": {},
+        "skew": {},
+        "implied_vs_realized": {},
+    }
     missed = 0
     avoided = 0
     for row in observed:
@@ -238,6 +246,21 @@ def build_attribution_report(
         for reason in _strings(row.get("hard_reasons")) + _strings(row.get("watch_reasons")):
             reason_groups.setdefault(reason, []).append(outcome)
 
+        efficiency_bucket = _surface_efficiency_bucket(row.get("surface_efficiency_score"))
+        if efficiency_bucket:
+            surface_groups["efficiency_bucket"].setdefault(efficiency_bucket, []).append(outcome)
+        move_bucket = _surface_move_bucket(row.get("surface_required_move_ratio"))
+        if move_bucket:
+            surface_groups["required_move_bucket"].setdefault(move_bucket, []).append(outcome)
+        for dimension, field in (
+            ("term_structure", "surface_term_structure_state"),
+            ("skew", "surface_skew_state"),
+            ("implied_vs_realized", "surface_implied_vs_realized_state"),
+        ):
+            state = _text(row.get(field))
+            if state:
+                surface_groups[dimension].setdefault(state, []).append(outcome)
+
     by_stage = [
         {"source_stage": stage, **_outcome_stats(group)}
         for stage, group in sorted(stage_groups.items())
@@ -252,11 +275,18 @@ def build_attribution_report(
         "samples": len(observed),
         "by_source_stage": by_stage,
         "reason_attribution": reason_attribution,
+        "surface_attribution": {
+            dimension: [
+                {"bucket": bucket, **_outcome_stats(group)}
+                for bucket, group in sorted(groups.items())
+            ]
+            for dimension, groups in surface_groups.items()
+        },
         "missed_opportunities": missed,
         "avoided_losses": avoided,
         "overall": _outcome_stats([_mapping(row.get("outcome")) for row in observed]),
         "warning": (
-            "Attribution is retrospective evaluation, not a recommendation. Rejected winners and avoided losses must both be retained to evaluate gate quality."
+            "Attribution is retrospective evaluation, not a recommendation. Rejected winners and avoided losses must both be retained to evaluate gate quality. Surface buckets are descriptive until sufficient out-of-sample evidence exists."
         ),
     }
 
@@ -298,6 +328,14 @@ def _outcome_entry(
         regime_fit_score=_bounded100(source.get("regime_fit_score")),
         evidence_score=_bounded100(source.get("evidence_score")),
         catalyst_score=_bounded100(source.get("catalyst_score")),
+        surface_efficiency_score=_bounded100(source.get("surface_efficiency_score")),
+        surface_required_move_ratio=_nonnegative(source.get("surface_required_move_ratio")),
+        surface_iv_percentile=_bounded100(source.get("surface_iv_percentile")),
+        candidate_iv_premium_to_atm_points=_number(source.get("candidate_iv_premium_to_atm_points")),
+        surface_atm_expected_move_pct=_nonnegative(source.get("surface_atm_expected_move_pct")),
+        surface_term_structure_state=_text(source.get("surface_term_structure_state")),
+        surface_skew_state=_text(source.get("surface_skew_state")),
+        surface_implied_vs_realized_state=_text(source.get("surface_implied_vs_realized_state")),
         expected_return_pct=_number(source.get("expected_return_pct")),
         lower_confidence_bound_pct=_number(source.get("lower_confidence_bound_pct")),
         empirical_target_hit_rate=_bounded01(source.get("empirical_target_hit_rate")),
@@ -339,6 +377,40 @@ def _outcome_stats(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_mfe_pct": _mean(values, "mfe_pct"),
         "mean_mae_pct": _mean(values, "mae_pct"),
     }
+
+
+def _empty_surface_attribution() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "efficiency_bucket": [],
+        "required_move_bucket": [],
+        "term_structure": [],
+        "skew": [],
+        "implied_vs_realized": [],
+    }
+
+
+def _surface_efficiency_bucket(value: object) -> str | None:
+    number = _number(value)
+    if number is None:
+        return None
+    if number < 35.0:
+        return "weak_<35"
+    if number < 60.0:
+        return "middle_35_60"
+    return "strong_>=60"
+
+
+def _surface_move_bucket(value: object) -> str | None:
+    number = _number(value)
+    if number is None or number < 0:
+        return None
+    if number < 1.0:
+        return "<1.0x"
+    if number < 1.5:
+        return "1.0_1.5x"
+    if number <= 2.0:
+        return "1.5_2.0x"
+    return ">2.0x"
 
 
 def _evaluation_end(contract: str, occurred_at: datetime, horizon_days: int) -> datetime | None:
