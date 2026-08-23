@@ -9,6 +9,7 @@ on:
       - "agent/api_server.py"
       - "agent/tests/test_trading_platform_*.py"
       - "agent/tests/test_options_market_personal*.py"
+      - "agent/tests/test_options_market_pipeline.py"
       - "agent/tests/test_options_market_catalyst*.py"
       - "agent/tests/test_options_market_alpaca_news.py"
       - "agent/tests/test_options_market_alpaca_surface.py"
@@ -23,7 +24,6 @@ on:
       - "scripts/generate_us_market_calendar.py"
       - "scripts/refresh_us_universe.py"
       - "scripts/refresh_focused_options.py"
-      - "scripts/catalysts.py"
       - "scripts/refresh_catalysts.py"
       - "scripts/backfill_us_market_data.py"
       - "scripts/assess_account_risk.py"
@@ -62,10 +62,10 @@ jobs:
         run: |
           python -m compileall -q agent/src/trading_platform agent/src/options_market agent/src/api/trading_platform_routes.py
           python -m py_compile agent/api_server.py scripts/publish_trading_desk.py scripts/generate_us_market_calendar.py scripts/refresh_us_universe.py scripts/refresh_focused_options.py scripts/refresh_catalysts.py scripts/backfill_us_market_data.py scripts/assess_account_risk.py scripts/run_personal_options_assistant.py scripts/run_paper_option_lifecycle.py scripts/evaluate_paper_exits.py scripts/checkpoint_candidate_outcomes.py scripts/refresh_paper_exit_state.py scripts/run_trading_platform_lifecycle_worker.py scripts/start_trading_platform.py scripts/trading_platform_preflight.py
-      - name: Run platform, surface, catalyst, paper and personal-decision tests
+      - name: Run platform, surface, ranking, catalyst, paper and personal-decision tests
         env:
           PYTHONPATH: agent
-        run: pytest agent/tests/test_trading_platform_*.py agent/tests/test_options_market_personal.py agent/tests/test_options_market_personal_data_quality.py agent/tests/test_options_market_surface*.py agent/tests/test_options_market_alpaca_surface.py agent/tests/test_options_market_catalyst*.py agent/tests/test_options_market_alpaca_news.py agent/tests/test_options_market_paper_rest.py -q
+        run: pytest agent/tests/test_trading_platform_*.py agent/tests/test_options_market_personal.py agent/tests/test_options_market_personal_data_quality.py agent/tests/test_options_market_pipeline.py agent/tests/test_options_market_surface*.py agent/tests/test_options_market_alpaca_surface.py agent/tests/test_options_market_catalyst*.py agent/tests/test_options_market_alpaca_news.py agent/tests/test_options_market_paper_rest.py -q
 
   frontend-build:
     runs-on: ubuntu-latest
