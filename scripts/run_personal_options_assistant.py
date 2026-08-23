@@ -84,6 +84,7 @@ def main() -> int:
         realized_vol_by_symbol=_numeric_mapping(args.realized_vol_json),
         iv_percentile_by_contract=_numeric_mapping(args.iv_percentile_json),
     )
+    personal = _enrich_journal_surface(personal, candidates)
     dashboard = build_personal_dashboard(personal, funnel=_funnel(analysis))
     previous = _object(args.previous_dashboard) if args.previous_dashboard else None
     alert = build_alert_event(dashboard, previous)
@@ -117,6 +118,48 @@ def _extract_candidates(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if isinstance(state, Mapping) and isinstance(state.get("latest_shortlist"), list):
         return [dict(row) for row in state["latest_shortlist"] if isinstance(row, Mapping)]
     return []
+
+
+def _enrich_journal_surface(
+    personal: Mapping[str, Any],
+    source_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Keep decision-time surface evidence on every journal candidate.
+
+    The compact personal journal projection predates surface analysis. Enriching
+    it here preserves point-in-time metrics without changing ranking decisions or
+    leaking later outcome information into the decision row.
+    """
+    result = dict(personal)
+    rows = personal.get("journal_candidates") if isinstance(personal.get("journal_candidates"), list) else []
+    by_contract = {
+        str(row.get("contract_symbol") or "").strip().upper(): row
+        for row in source_candidates
+        if str(row.get("contract_symbol") or "").strip()
+    }
+    enriched: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        source = by_contract.get(str(row.get("contract_symbol") or "").strip().upper())
+        if isinstance(source, Mapping):
+            surface = source.get("surface_context") if isinstance(source.get("surface_context"), Mapping) else {}
+            row.update(
+                {
+                    "surface_efficiency_score": source.get("surface_efficiency_score") or surface.get("surface_efficiency_score"),
+                    "surface_required_move_ratio": source.get("surface_required_move_ratio") or surface.get("required_move_vs_surface_expected_move"),
+                    "surface_iv_percentile": source.get("surface_iv_percentile") or surface.get("surface_iv_percentile"),
+                    "candidate_iv_premium_to_atm_points": surface.get("candidate_iv_premium_to_atm_points"),
+                    "surface_atm_expected_move_pct": surface.get("atm_expected_move_pct"),
+                    "surface_term_structure_state": surface.get("term_structure_state"),
+                    "surface_skew_state": surface.get("skew_state"),
+                    "surface_implied_vs_realized_state": surface.get("implied_vs_realized_state"),
+                }
+            )
+        enriched.append(row)
+    result["journal_candidates"] = enriched
+    return result
 
 
 def _load_regime(args: argparse.Namespace) -> dict[str, Any]:

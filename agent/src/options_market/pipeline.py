@@ -109,6 +109,9 @@ def combine_rankings(
                     + cfg.catalyst_weight * catalyst
                 )
 
+            # Preserve the point-in-time contract evidence used by downstream
+            # quality, risk, journal and attribution layers. Ranking may add
+            # fields, but must not silently strip Greeks/provenance/surface data.
             accepted.append(
                 {
                     "symbol": symbol,
@@ -116,22 +119,41 @@ def combine_rankings(
                     "setup_type": chart.get("setup_type"),
                     "chart_rank": chart.get("rank"),
                     "chart_score": round(chart_score, 2),
+                    "realized_vol20_pct": chart.get("realized_vol20_pct"),
                     "contract_symbol": option.get("contract_symbol"),
                     "option_type": expected_option_type,
                     "option_score": round(option_score, 2),
                     "ranking_score": round(ranking_score, 2),
                     "target_profit_pct": cfg.target_profit_pct,
                     "target_multiple": round(1.0 + cfg.target_profit_pct / 100.0, 4),
+                    "spot": option.get("spot"),
+                    "strike": option.get("strike"),
+                    "expiration": option.get("expiration"),
+                    "dte": option.get("dte"),
+                    "bid": option.get("bid"),
                     "entry_ask": option.get("entry_ask"),
                     "max_loss_usd": option.get("max_loss_usd"),
                     "target_premium": option.get("target_premium"),
+                    "target_underlying_at_expiry": option.get("target_underlying_at_expiry"),
                     "required_underlying_move_pct": option.get("required_underlying_move_pct"),
+                    "one_sigma_implied_move_pct": option.get("one_sigma_implied_move_pct"),
                     "required_move_vs_one_sigma": move_ratio,
                     "spread_pct": option.get("spread_pct"),
                     "open_interest": option.get("open_interest"),
                     "volume": option.get("volume"),
                     "implied_volatility": option.get("implied_volatility"),
-                    "dte": option.get("dte"),
+                    "delta": option.get("delta"),
+                    "gamma": option.get("gamma"),
+                    "theta": option.get("theta"),
+                    "vega": option.get("vega"),
+                    "surface_context": option.get("surface_context"),
+                    "surface_efficiency_score": option.get("surface_efficiency_score"),
+                    "surface_iv_percentile": option.get("surface_iv_percentile"),
+                    "surface_required_move_ratio": option.get("surface_required_move_ratio"),
+                    "data_source": option.get("data_source"),
+                    "option_feed": option.get("option_feed"),
+                    "execution_grade_feed": option.get("execution_grade_feed"),
+                    "data_warnings": list(option.get("data_warnings") or []),
                     "catalyst_score": None if catalyst is None else round(catalyst, 2),
                     "score_interpretation": "ranking score only; not probability, expected return, or guarantee",
                 }

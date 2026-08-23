@@ -15,6 +15,7 @@ import {
 import {
   tradingDeskApi,
   type DeskDecision,
+  type TradingDeskAttribution,
   type TradingDeskEvent,
   type TradingDeskOpportunity,
   type TradingDeskSnapshot,
@@ -36,6 +37,11 @@ function fmtPct(value: number | null | undefined, digits = 1) {
 function fmtMoney(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return "—";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+}
+
+function fmtRatio(value: number | null | undefined, digits = 2) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(digits)}×`;
 }
 
 function decisionClass(decision: DeskDecision) {
@@ -68,6 +74,14 @@ function MetricCard({ label, value, detail, icon: Icon }: { label: string; value
 
 function Opportunity({ item, index }: { item: TradingDeskOpportunity; index: number }) {
   const reasons = item.decision === "PASS" ? item.hard_reasons : item.watch_reasons;
+  const hasSurface = [
+    item.surface_efficiency_score,
+    item.surface_required_move_ratio,
+    item.surface_atm_expected_move_pct,
+    item.candidate_iv_premium_to_atm_points,
+  ].some((value) => value != null)
+    || Boolean(item.surface_term_structure_state || item.surface_skew_state || item.surface_implied_vs_realized_state);
+
   return (
     <div className="rounded-xl border border-border/70 bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -103,6 +117,27 @@ function Opportunity({ item, index }: { item: TradingDeskOpportunity; index: num
         <Small label="Spread / IV pctile" value={`${fmtPct(item.spread_pct)} / ${fmtNumber(item.iv_percentile, 0)}`} />
       </div>
 
+      {hasSurface && (
+        <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Volatility surface</div>
+            <div className="text-[10px] text-muted-foreground">relative contract context · not probability</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+            <Small label="Efficiency" value={fmtNumber(item.surface_efficiency_score, 1)} />
+            <Small label="Move / ATM exp." value={fmtRatio(item.surface_required_move_ratio)} />
+            <Small label="ATM exp. move" value={fmtPct(item.surface_atm_expected_move_pct)} />
+            <Small
+              label="IV vs ATM"
+              value={item.candidate_iv_premium_to_atm_points == null ? "—" : `${item.candidate_iv_premium_to_atm_points >= 0 ? "+" : ""}${item.candidate_iv_premium_to_atm_points.toFixed(1)} vol pts`}
+            />
+            <Small label="Term" value={item.surface_term_structure_state || "—"} />
+            <Small label="Skew" value={item.surface_skew_state || "—"} />
+            <Small label="IV vs RV" value={item.surface_implied_vs_realized_state || "—"} />
+          </div>
+        </div>
+      )}
+
       {reasons.length > 0 && (
         <div className="mt-4 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
           {reasons.join(" · ")}
@@ -124,6 +159,7 @@ function Small({ label, value }: { label: string; value: string }) {
 export function TradingDesk() {
   const [snapshot, setSnapshot] = useState<TradingDeskSnapshot | null>(null);
   const [events, setEvents] = useState<TradingDeskEvent[]>([]);
+  const [attribution, setAttribution] = useState<TradingDeskAttribution | null>(null);
   const [counts, setCounts] = useState({ snapshots: 0, events: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -131,13 +167,15 @@ export function TradingDesk() {
 
   const refresh = useCallback(async () => {
     try {
-      const [desk, eventResult] = await Promise.all([
+      const [desk, eventResult, attributionResult] = await Promise.all([
         tradingDeskApi.getLatest(),
         tradingDeskApi.getEvents(25),
+        tradingDeskApi.getAttribution(),
       ]);
       setSnapshot(desk.snapshot);
       setCounts(desk.counts);
       setEvents(eventResult.events);
+      setAttribution(attributionResult.attribution);
       setError(null);
       setLastRefresh(new Date());
     } catch (e) {
@@ -173,7 +211,7 @@ export function TradingDesk() {
             </div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight">Trading Desk</h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Whole-market research → evidence → options quality → risk → paper approval. Live execution remains disabled.
+              Whole-market research → volatility surface → evidence → risk → paper approval → retrospective learning. Live execution remains disabled.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -267,6 +305,32 @@ export function TradingDesk() {
                       </div>
                     ))}
                   </div>
+                </section>
+
+                <section className="rounded-xl border border-border/70 bg-card p-4">
+                  <div className="flex items-center gap-2">
+                    <BrainCircuit className="h-4 w-4" />
+                    <h2 className="text-sm font-semibold">Learning loop</h2>
+                  </div>
+                  {!attribution || attribution.samples === 0 ? (
+                    <p className="mt-3 text-xs text-muted-foreground">No mature retrospective outcomes yet. Decisions remain uncalibrated until later option paths are observed.</p>
+                  ) : (
+                    <>
+                      <div className="mt-3 grid grid-cols-2 gap-3">
+                        <Small label="Mature samples" value={fmtNumber(attribution.samples)} />
+                        <Small label="2× touched" value={fmtPct((attribution.overall?.touch_2x_rate || 0) * 100)} />
+                        <Small label="4× target hit" value={fmtPct((attribution.overall?.target_hit_rate || 0) * 100)} />
+                        <Small label="Full-loss proxy" value={fmtPct((attribution.overall?.full_loss_proxy_rate || 0) * 100)} />
+                        <Small label="Missed winners" value={fmtNumber(attribution.missed_opportunities)} />
+                        <Small label="Avoided losses" value={fmtNumber(attribution.avoided_losses)} />
+                      </div>
+                      <div className="mt-3 rounded-md bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
+                        {attribution.samples < 30
+                          ? "Calibration immature: descriptive evidence only; do not promote surface rules from this sample."
+                          : "Retrospective evidence only. Policy changes still require explicit versioned review."}
+                      </div>
+                    </>
+                  )}
                 </section>
 
                 <section className="rounded-xl border border-border/70 bg-card p-4">

@@ -35,6 +35,13 @@ export interface TradingDeskOpportunity {
   configured_contract_cap?: number | null;
   spread_pct?: number | null;
   iv_percentile?: number | null;
+  surface_efficiency_score?: number | null;
+  surface_required_move_ratio?: number | null;
+  candidate_iv_premium_to_atm_points?: number | null;
+  surface_atm_expected_move_pct?: number | null;
+  surface_term_structure_state?: string | null;
+  surface_skew_state?: string | null;
+  surface_implied_vs_realized_state?: string | null;
   data_feed?: string | null;
   hard_reasons: string[];
   watch_reasons: string[];
@@ -74,9 +81,13 @@ export interface TradingDeskSnapshot {
     open_premium_risk_usd?: number | null;
     open_premium_risk_pct?: number | null;
     daily_realized_pnl_usd?: number | null;
+    weekly_realized_pnl_usd?: number | null;
+    max_drawdown_pct?: number | null;
     positions: number;
     trading_blocked: boolean;
     blocking_reasons: string[];
+    greeks?: Record<string, unknown>;
+    concentration?: Record<string, unknown>;
   };
   data_quality: {
     healthy: boolean;
@@ -110,6 +121,7 @@ export interface TradingDeskJournalEntry {
     | "filled"
     | "exit_proposed"
     | "exited"
+    | "outcome_observed"
     | "cancelled"
     | "expired"
     | "error";
@@ -124,6 +136,14 @@ export interface TradingDeskJournalEntry {
   ranking_score?: number | null;
   option_quality_score?: number | null;
   regime_fit_score?: number | null;
+  surface_efficiency_score?: number | null;
+  surface_required_move_ratio?: number | null;
+  surface_iv_percentile?: number | null;
+  candidate_iv_premium_to_atm_points?: number | null;
+  surface_atm_expected_move_pct?: number | null;
+  surface_term_structure_state?: string | null;
+  surface_skew_state?: string | null;
+  surface_implied_vs_realized_state?: string | null;
   expected_return_pct?: number | null;
   lower_confidence_bound_pct?: number | null;
   ev_samples?: number | null;
@@ -132,6 +152,38 @@ export interface TradingDeskJournalEntry {
   broker_order_id?: string | null;
   fill_price?: number | null;
   realized_pnl_usd?: number | null;
+}
+
+export interface AttributionStats {
+  samples: number;
+  target_hit_rate: number;
+  touch_2x_rate: number;
+  full_loss_proxy_rate: number;
+  mean_end_return_pct?: number | null;
+  median_max_multiple?: number | null;
+  mean_mfe_pct?: number | null;
+  mean_mae_pct?: number | null;
+}
+
+export interface AttributionBucket extends AttributionStats {
+  bucket: string;
+}
+
+export interface TradingDeskAttribution {
+  samples: number;
+  missed_opportunities: number;
+  avoided_losses: number;
+  overall?: AttributionStats;
+  by_source_stage: Array<AttributionStats & { source_stage: string }>;
+  reason_attribution: Array<AttributionStats & { reason: string }>;
+  surface_attribution: {
+    efficiency_bucket: AttributionBucket[];
+    required_move_bucket: AttributionBucket[];
+    term_structure: AttributionBucket[];
+    skew: AttributionBucket[];
+    implied_vs_realized: AttributionBucket[];
+  };
+  warning: string;
 }
 
 async function json<T>(path: string): Promise<T> {
@@ -165,4 +217,8 @@ export const tradingDeskApi = {
       `/api/trading-desk/journal?${query.toString()}`,
     );
   },
+  getAttribution: (limit = 2000) =>
+    json<{ status: string; attribution: TradingDeskAttribution }>(
+      `/api/trading-desk/attribution?limit=${encodeURIComponent(String(limit))}`,
+    ),
 };

@@ -2,8 +2,9 @@
 
 This module deliberately separates contract quality from directional conviction.
 A strong stock setup can still be a poor option trade when the spread is wide,
-open interest is thin, theta is excessive, or implied volatility is extremely
-rich relative to realized volatility.
+open interest is thin, theta is excessive, implied volatility is extremely rich,
+or the target move is implausible relative to the underlying's broader option
+surface.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ class OptionQualityConfig:
     max_theta_pct_of_premium_per_day: float = 8.0
     expensive_iv_percentile: float = 85.0
     max_iv_to_rv_ratio_without_catalyst: float = 2.25
+    max_required_move_vs_surface_expected: float = 2.0
+    weak_surface_efficiency_score: float = 35.0
+    extreme_iv_premium_to_atm_points: float = 20.0
     min_quality_score: float = 60.0
 
     def validate(self) -> None:
@@ -42,6 +46,12 @@ class OptionQualityConfig:
             raise ValueError("expensive_iv_percentile must be 0..100")
         if self.max_iv_to_rv_ratio_without_catalyst <= 0:
             raise ValueError("max_iv_to_rv_ratio_without_catalyst must be positive")
+        if self.max_required_move_vs_surface_expected <= 0:
+            raise ValueError("max_required_move_vs_surface_expected must be positive")
+        if not 0 <= self.weak_surface_efficiency_score <= 100:
+            raise ValueError("weak_surface_efficiency_score must be 0..100")
+        if self.extreme_iv_premium_to_atm_points <= 0:
+            raise ValueError("extreme_iv_premium_to_atm_points must be positive")
         if not 0 <= self.min_quality_score <= 100:
             raise ValueError("min_quality_score must be 0..100")
 
@@ -70,8 +80,28 @@ def assess_option_quality(
     gamma = _finite(candidate.get("gamma"))
     vega = _finite(candidate.get("vega"))
     catalyst = _bounded(catalyst_score)
-    iv_rank = _bounded(iv_percentile)
-    rv = _positive(realized_vol_pct)
+    rv_source = realized_vol_pct if realized_vol_pct is not None else candidate.get("realized_vol20_pct")
+    rv = _positive(rv_source)
+
+    surface_context = candidate.get("surface_context") if isinstance(candidate.get("surface_context"), Mapping) else {}
+    surface_efficiency = _bounded(
+        candidate.get("surface_efficiency_score")
+        if candidate.get("surface_efficiency_score") is not None
+        else surface_context.get("surface_efficiency_score")
+    )
+    surface_move_ratio = _positive(
+        candidate.get("surface_required_move_ratio")
+        if candidate.get("surface_required_move_ratio") is not None
+        else surface_context.get("required_move_vs_surface_expected_move")
+    )
+    iv_premium_to_atm = _finite(surface_context.get("candidate_iv_premium_to_atm_points"))
+    surface_iv_source = (
+        candidate.get("surface_iv_percentile")
+        if candidate.get("surface_iv_percentile") is not None
+        else surface_context.get("surface_iv_percentile")
+    )
+    surface_iv_percentile = _bounded(surface_iv_source)
+    iv_rank = _bounded(iv_percentile) if iv_percentile is not None else surface_iv_percentile
 
     hard_reasons: list[str] = []
     warnings: list[str] = []
@@ -112,6 +142,15 @@ def assess_option_quality(
     if iv_rank is not None and iv_rank >= cfg.expensive_iv_percentile:
         warnings.append("iv_percentile_expensive")
 
+    if surface_efficiency is None:
+        warnings.append("volatility_surface_context_missing")
+    elif surface_efficiency < cfg.weak_surface_efficiency_score:
+        warnings.append("surface_efficiency_weak")
+    if iv_premium_to_atm is not None and iv_premium_to_atm >= cfg.extreme_iv_premium_to_atm_points:
+        warnings.append("contract_iv_extreme_vs_same_expiry_atm")
+    if surface_move_ratio is not None and surface_move_ratio > cfg.max_required_move_vs_surface_expected:
+        hard_reasons.append("required_move_extreme_vs_surface_expected_move")
+
     spread_score = 0.0 if spread_pct is None or not math.isfinite(spread_pct) else 30.0 * max(
         0.0, 1.0 - spread_pct / cfg.max_spread_pct
     )
@@ -140,7 +179,21 @@ def assess_option_quality(
     if catalyst is not None and catalyst >= 70.0:
         volatility_score = min(14.0, volatility_score + 3.0)
 
-    quality_score = spread_score + oi_score + volume_score + delta_score + theta_score + volatility_score
+    surface_adjustment = 0.0
+    if surface_efficiency is not None:
+        # Surface diagnostics are new and intentionally have only a small bounded
+        # influence until retrospective attribution supports stronger weighting.
+        surface_adjustment = max(-5.0, min(5.0, (surface_efficiency - 50.0) * 0.10))
+
+    quality_score = (
+        spread_score
+        + oi_score
+        + volume_score
+        + delta_score
+        + theta_score
+        + volatility_score
+        + surface_adjustment
+    )
     quality_score = min(100.0, max(0.0, quality_score))
     passed = not hard_reasons and quality_score >= cfg.min_quality_score
 
@@ -164,6 +217,12 @@ def assess_option_quality(
             "theta": theta,
             "vega": vega,
             "theta_pct_of_premium_per_day": None if theta_burden is None else round(theta_burden, 4),
+            "surface_efficiency_score": surface_efficiency,
+            "surface_required_move_ratio": surface_move_ratio,
+            "candidate_iv_premium_to_atm_points": iv_premium_to_atm,
+            "surface_term_structure_state": surface_context.get("term_structure_state"),
+            "surface_skew_state": surface_context.get("skew_state"),
+            "surface_implied_vs_realized_state": surface_context.get("implied_vs_realized_state"),
         },
         "components": {
             "spread": round(spread_score, 2),
@@ -172,7 +231,9 @@ def assess_option_quality(
             "delta": round(delta_score, 2),
             "theta": round(theta_score, 2),
             "volatility": round(volatility_score, 2),
+            "surface_adjustment": round(surface_adjustment, 2),
         },
+        "surface_context": dict(surface_context),
         "config": asdict(cfg),
         "interpretation": "contract-quality heuristic only; not probability or expected return",
     }

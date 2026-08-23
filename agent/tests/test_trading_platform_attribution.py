@@ -36,6 +36,14 @@ def _source_entry(*, decision=DeskDecision.PASS, stage=JournalStage.REJECTED, re
         direction="bullish",
         option_type="call",
         ranking_score=80.0,
+        surface_efficiency_score=64.0,
+        surface_required_move_ratio=1.25,
+        surface_iv_percentile=72.0,
+        candidate_iv_premium_to_atm_points=8.0,
+        surface_atm_expected_move_pct=14.0,
+        surface_term_structure_state="front_loaded",
+        surface_skew_state="put_skew",
+        surface_implied_vs_realized_state="rich",
         entry_ask=1.0,
         hard_reasons=list(reasons or ["negative_ev"]),
     )
@@ -111,6 +119,10 @@ def test_mature_candidate_uses_future_bid_path_and_is_idempotent(tmp_path) -> No
         assert len(outcomes) == 1
         assert outcomes[0]["metadata"]["source_journal_id"] == source.journal_id
         assert outcomes[0]["metadata"]["evaluation_only"] is True
+        assert outcomes[0]["surface_efficiency_score"] == 64.0
+        assert outcomes[0]["surface_required_move_ratio"] == 1.25
+        assert outcomes[0]["surface_term_structure_state"] == "front_loaded"
+        assert outcomes[0]["surface_skew_state"] == "put_skew"
 
 
 def test_insufficient_future_quotes_are_not_fabricated(tmp_path) -> None:
@@ -135,6 +147,11 @@ def test_attribution_keeps_rejected_winners_and_avoided_losses() -> None:
             "stage": "outcome_observed",
             "hard_reasons": ["negative_ev"],
             "watch_reasons": [],
+            "surface_efficiency_score": 70.0,
+            "surface_required_move_ratio": 0.9,
+            "surface_term_structure_state": "front_loaded",
+            "surface_skew_state": "put_skew",
+            "surface_implied_vs_realized_state": "rich",
             "metadata": {"source_stage": "rejected"},
             "outcome": {
                 "target_hit": True,
@@ -150,6 +167,11 @@ def test_attribution_keeps_rejected_winners_and_avoided_losses() -> None:
             "stage": "outcome_observed",
             "hard_reasons": ["negative_ev"],
             "watch_reasons": [],
+            "surface_efficiency_score": 20.0,
+            "surface_required_move_ratio": 1.8,
+            "surface_term_structure_state": "back_loaded",
+            "surface_skew_state": "balanced",
+            "surface_implied_vs_realized_state": "cheap",
             "metadata": {"source_stage": "rejected"},
             "outcome": {
                 "target_hit": False,
@@ -169,3 +191,16 @@ def test_attribution_keeps_rejected_winners_and_avoided_losses() -> None:
     assert report["avoided_losses"] == 1
     assert report["reason_attribution"][0]["reason"] == "negative_ev"
     assert report["reason_attribution"][0]["samples"] == 2
+
+    efficiency = {row["bucket"]: row for row in report["surface_attribution"]["efficiency_bucket"]}
+    assert efficiency["strong_>=60"]["samples"] == 1
+    assert efficiency["strong_>=60"]["target_hit_rate"] == 1.0
+    assert efficiency["weak_<35"]["full_loss_proxy_rate"] == 1.0
+
+    move = {row["bucket"]: row for row in report["surface_attribution"]["required_move_bucket"]}
+    assert move["<1.0x"]["target_hit_rate"] == 1.0
+    assert move["1.5_2.0x"]["target_hit_rate"] == 0.0
+
+    term = {row["bucket"]: row for row in report["surface_attribution"]["term_structure"]}
+    assert term["front_loaded"]["samples"] == 1
+    assert term["back_loaded"]["samples"] == 1

@@ -7,6 +7,7 @@ from .alpaca_news import (
     article_to_catalyst_rows,
     classify_headline,
 )
+from .alpaca_surface import fetch_alpaca_volatility_surface
 from .catalyst import (
     CatalystEvent,
     CatalystScoreConfig,
@@ -59,6 +60,7 @@ from .regime import RegimeConfig, classify_market_regime, regime_direction_fit
 from .replay import ReplayConfig, label_replay_candidates, replay_many, replay_selection_at
 from .risk import PortfolioRiskConfig, assess_portfolio_risk
 from .store import OptionsResearchStore
+from .surface import VolatilitySurfaceConfig, analyze_volatility_surface, contract_surface_context
 from .universe import USListing, fetch_us_listed_universe, parse_symbol_directory
 from .volatility import OptionQualityConfig, assess_option_quality
 from .walkforward import WalkForwardConfig, evaluate_walk_forward
@@ -98,7 +100,9 @@ __all__ = [
     "ReplayConfig",
     "TradingSession",
     "USListing",
+    "VolatilitySurfaceConfig",
     "WalkForwardConfig",
+    "analyze_volatility_surface",
     "article_to_catalyst_rows",
     "assess_option_quality",
     "assess_portfolio_risk",
@@ -114,11 +118,13 @@ __all__ = [
     "classify_market_regime",
     "combine_rankings",
     "compute_chart_snapshot",
+    "contract_surface_context",
     "directional_catalyst_scores",
     "empirical_expected_value",
     "evaluate_payoff_targets",
     "evaluate_personal_candidate",
     "evaluate_walk_forward",
+    "fetch_alpaca_volatility_surface",
     "fetch_us_listed_universe",
     "label_long_option_path",
     "label_replay_candidates",

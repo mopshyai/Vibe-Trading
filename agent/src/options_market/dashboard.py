@@ -29,7 +29,10 @@ def build_personal_dashboard(
     for row in candidates:
         ev = row.get("empirical_ev") if isinstance(row.get("empirical_ev"), Mapping) else {}
         quality = row.get("option_quality") if isinstance(row.get("option_quality"), Mapping) else {}
+        quality_metrics = quality.get("metrics") if isinstance(quality.get("metrics"), Mapping) else {}
+        surface = quality.get("surface_context") if isinstance(quality.get("surface_context"), Mapping) else {}
         risk = row.get("risk") if isinstance(row.get("risk"), Mapping) else {}
+        data_quality = row.get("data_quality") if isinstance(row.get("data_quality"), Mapping) else {}
         cards.append(
             {
                 "decision": row.get("decision"),
@@ -48,8 +51,16 @@ def build_personal_dashboard(
                 "max_loss_usd_per_contract": row.get("max_loss_usd_per_contract"),
                 "configured_contract_cap": row.get("max_contracts_within_configured_single_trade_risk"),
                 "risk_approved": risk.get("approved"),
-                "spread_pct": (quality.get("metrics") or {}).get("spread_pct") if isinstance(quality.get("metrics"), Mapping) else None,
-                "iv_percentile": (quality.get("metrics") or {}).get("iv_percentile") if isinstance(quality.get("metrics"), Mapping) else None,
+                "spread_pct": quality_metrics.get("spread_pct"),
+                "iv_percentile": quality_metrics.get("iv_percentile"),
+                "surface_efficiency_score": quality_metrics.get("surface_efficiency_score"),
+                "surface_required_move_ratio": quality_metrics.get("surface_required_move_ratio"),
+                "candidate_iv_premium_to_atm_points": quality_metrics.get("candidate_iv_premium_to_atm_points"),
+                "surface_atm_expected_move_pct": surface.get("atm_expected_move_pct"),
+                "surface_term_structure_state": quality_metrics.get("surface_term_structure_state"),
+                "surface_skew_state": quality_metrics.get("surface_skew_state"),
+                "surface_implied_vs_realized_state": quality_metrics.get("surface_implied_vs_realized_state"),
+                "data_feed": data_quality.get("option_feed"),
                 "hard_reasons": row.get("hard_reasons") or [],
                 "watch_reasons": row.get("watch_reasons") or [],
             }
