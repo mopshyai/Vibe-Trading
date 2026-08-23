@@ -80,7 +80,8 @@ def assess_option_quality(
     gamma = _finite(candidate.get("gamma"))
     vega = _finite(candidate.get("vega"))
     catalyst = _bounded(catalyst_score)
-    rv = _positive(realized_vol_pct)
+    rv_source = realized_vol_pct if realized_vol_pct is not None else candidate.get("realized_vol20_pct")
+    rv = _positive(rv_source)
 
     surface_context = candidate.get("surface_context") if isinstance(candidate.get("surface_context"), Mapping) else {}
     surface_efficiency = _bounded(
@@ -94,7 +95,12 @@ def assess_option_quality(
         else surface_context.get("required_move_vs_surface_expected_move")
     )
     iv_premium_to_atm = _finite(surface_context.get("candidate_iv_premium_to_atm_points"))
-    surface_iv_percentile = _bounded(candidate.get("surface_iv_percentile") or surface_context.get("surface_iv_percentile"))
+    surface_iv_source = (
+        candidate.get("surface_iv_percentile")
+        if candidate.get("surface_iv_percentile") is not None
+        else surface_context.get("surface_iv_percentile")
+    )
+    surface_iv_percentile = _bounded(surface_iv_source)
     iv_rank = _bounded(iv_percentile) if iv_percentile is not None else surface_iv_percentile
 
     hard_reasons: list[str] = []
