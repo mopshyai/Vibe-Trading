@@ -74,6 +74,15 @@ class FakeStore:
         return pd.DataFrame()
 
 
+class NoHistoricalIVStore(FakeStore):
+    def option_quotes_asof(self, **kwargs):
+        frame = super().option_quotes_asof(**kwargs)
+        if kwargs.get("underlyings") and not frame.empty:
+            frame = frame.copy()
+            frame["implied_volatility"] = None
+        return frame
+
+
 def _selection(symbols_seen: list[list[str]]):
     def fake_replay(store, symbols, *, research_time, config):
         symbols_seen.append(list(symbols))
@@ -142,6 +151,8 @@ def test_static_project_symbol_is_not_stripped_and_run_is_labeled(monkeypatch) -
     assert seen == [["AAPL.US"]]
     assert report["survivorship_bias_control"]["point_in_time_universe"] is False
     assert "static_universe_survivorship_bias_possible" in report["data_completeness_warnings"]
+    assert "data_snapshot_id_missing_reproducibility_weaker" in report["data_completeness_warnings"]
+    assert report["universe_fingerprint"].startswith("universe_")
     assert report["selected_candidate_count"] == 1
     assert report["mature_outcome_count"] == 1
     assert report["outcomes"][0]["target_hit"] is True
@@ -162,12 +173,60 @@ def test_point_in_time_universe_uses_latest_snapshot_available_at_research_time(
         evaluation_as_of=EVALUATION,
         universe_snapshots=snapshots,
         experiment_config=HistoricalExperimentConfig(outcome_horizon_days=5, min_bucket_samples=1),
+        lineage=ExperimentLineage(data_snapshot_id="dataset-2026-02-15"),
     )
 
     assert seen == [["AAPL.US"]]
     assert report["universe_mode"] == "point_in_time_snapshots"
     assert report["survivorship_bias_control"]["point_in_time_universe"] is True
     assert report["sessions"][0]["universe"]["source"] == "snapshot-1"
+    assert report["lineage"]["data_snapshot_id"] == "dataset-2026-02-15"
+    assert "data_snapshot_id_missing_reproducibility_weaker" not in report["data_completeness_warnings"]
+
+
+def test_universe_history_changes_experiment_identity(monkeypatch) -> None:
+    monkeypatch.setattr(experiments, "replay_selection_at", _selection([]))
+    cfg = HistoricalExperimentConfig(outcome_horizon_days=5, min_bucket_samples=1)
+    lineage = ExperimentLineage(commit_sha="abc", data_snapshot_id="data-1")
+    first = run_historical_research_experiment(
+        FakeStore(),
+        [RESEARCH],
+        evaluation_as_of=EVALUATION,
+        universe_snapshots=[
+            {"available_at": "2026-01-01T20:00:00+00:00", "symbols": ["AAPL.US"], "source": "u1"}
+        ],
+        experiment_config=cfg,
+        lineage=lineage,
+    )
+    second = run_historical_research_experiment(
+        FakeStore(),
+        [RESEARCH],
+        evaluation_as_of=EVALUATION,
+        universe_snapshots=[
+            {"available_at": "2026-01-01T20:00:00+00:00", "symbols": ["AAPL.US", "MSFT.US"], "source": "u1"}
+        ],
+        experiment_config=cfg,
+        lineage=lineage,
+    )
+    assert first["universe_fingerprint"] != second["universe_fingerprint"]
+    assert first["experiment_id"] != second["experiment_id"]
+
+
+def test_historical_iv_gap_is_explicit_and_not_invented(monkeypatch) -> None:
+    monkeypatch.setattr(experiments, "replay_selection_at", _selection([]))
+    report = run_historical_research_experiment(
+        NoHistoricalIVStore(),
+        [RESEARCH],
+        evaluation_as_of=EVALUATION,
+        static_symbols=["AAPL.US"],
+        experiment_config=HistoricalExperimentConfig(
+            allow_static_universe=True,
+            outcome_horizon_days=5,
+            min_bucket_samples=1,
+        ),
+    )
+    assert "historical_implied_volatility_unavailable" in report["data_completeness_warnings"]
+    assert report["selected_candidates"][0].get("surface_efficiency_score") is None
 
 
 def test_outcome_is_not_labeled_before_fixed_horizon_matures(monkeypatch) -> None:
@@ -193,7 +252,7 @@ def test_experiment_id_is_deterministic_for_same_inputs(monkeypatch) -> None:
         evaluation_as_of=EVALUATION,
         static_symbols=["AAPL.US"],
         experiment_config=HistoricalExperimentConfig(allow_static_universe=True, outcome_horizon_days=5),
-        lineage=ExperimentLineage(commit_sha="abc123"),
+        lineage=ExperimentLineage(commit_sha="abc123", data_snapshot_id="snapshot-123"),
     )
     first = run_historical_research_experiment(FakeStore(), [RESEARCH], **kwargs)
     second = run_historical_research_experiment(FakeStore(), [RESEARCH], **kwargs)
