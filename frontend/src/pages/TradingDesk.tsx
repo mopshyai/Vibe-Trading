@@ -15,6 +15,7 @@ import {
 import {
   tradingDeskApi,
   type DeskDecision,
+  type TradingDeskAttribution,
   type TradingDeskEvent,
   type TradingDeskOpportunity,
   type TradingDeskSnapshot,
@@ -158,6 +159,7 @@ function Small({ label, value }: { label: string; value: string }) {
 export function TradingDesk() {
   const [snapshot, setSnapshot] = useState<TradingDeskSnapshot | null>(null);
   const [events, setEvents] = useState<TradingDeskEvent[]>([]);
+  const [attribution, setAttribution] = useState<TradingDeskAttribution | null>(null);
   const [counts, setCounts] = useState({ snapshots: 0, events: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -165,13 +167,15 @@ export function TradingDesk() {
 
   const refresh = useCallback(async () => {
     try {
-      const [desk, eventResult] = await Promise.all([
+      const [desk, eventResult, attributionResult] = await Promise.all([
         tradingDeskApi.getLatest(),
         tradingDeskApi.getEvents(25),
+        tradingDeskApi.getAttribution(),
       ]);
       setSnapshot(desk.snapshot);
       setCounts(desk.counts);
       setEvents(eventResult.events);
+      setAttribution(attributionResult.attribution);
       setError(null);
       setLastRefresh(new Date());
     } catch (e) {
@@ -207,7 +211,7 @@ export function TradingDesk() {
             </div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight">Trading Desk</h1>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Whole-market research → volatility surface → evidence → risk → paper approval. Live execution remains disabled.
+              Whole-market research → volatility surface → evidence → risk → paper approval → retrospective learning. Live execution remains disabled.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -301,6 +305,32 @@ export function TradingDesk() {
                       </div>
                     ))}
                   </div>
+                </section>
+
+                <section className="rounded-xl border border-border/70 bg-card p-4">
+                  <div className="flex items-center gap-2">
+                    <BrainCircuit className="h-4 w-4" />
+                    <h2 className="text-sm font-semibold">Learning loop</h2>
+                  </div>
+                  {!attribution || attribution.samples === 0 ? (
+                    <p className="mt-3 text-xs text-muted-foreground">No mature retrospective outcomes yet. Decisions remain uncalibrated until later option paths are observed.</p>
+                  ) : (
+                    <>
+                      <div className="mt-3 grid grid-cols-2 gap-3">
+                        <Small label="Mature samples" value={fmtNumber(attribution.samples)} />
+                        <Small label="2× touched" value={fmtPct((attribution.overall?.touch_2x_rate || 0) * 100)} />
+                        <Small label="4× target hit" value={fmtPct((attribution.overall?.target_hit_rate || 0) * 100)} />
+                        <Small label="Full-loss proxy" value={fmtPct((attribution.overall?.full_loss_proxy_rate || 0) * 100)} />
+                        <Small label="Missed winners" value={fmtNumber(attribution.missed_opportunities)} />
+                        <Small label="Avoided losses" value={fmtNumber(attribution.avoided_losses)} />
+                      </div>
+                      <div className="mt-3 rounded-md bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
+                        {attribution.samples < 30
+                          ? "Calibration immature: descriptive evidence only; do not promote surface rules from this sample."
+                          : "Retrospective evidence only. Policy changes still require explicit versioned review."}
+                      </div>
+                    </>
+                  )}
                 </section>
 
                 <section className="rounded-xl border border-border/70 bg-card p-4">
