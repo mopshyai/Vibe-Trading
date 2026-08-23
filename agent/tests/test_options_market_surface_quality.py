@@ -85,3 +85,32 @@ def test_surface_efficiency_only_has_bounded_score_influence() -> None:
     assert strong["quality_score"] - weak["quality_score"] <= 10.0
     assert weak["components"]["surface_adjustment"] == -5.0
     assert strong["components"]["surface_adjustment"] == 5.0
+
+
+def test_chart_realized_vol_falls_through_pipeline_into_quality() -> None:
+    report = assess_option_quality(
+        _candidate(
+            realized_vol20_pct=20.0,
+            surface_efficiency_score=50.0,
+            surface_required_move_ratio=1.0,
+            surface_context={"surface_efficiency_score": 50.0},
+        )
+    )
+    assert report["metrics"]["realized_vol_pct"] == 20.0
+    assert report["metrics"]["iv_to_realized_vol"] == 2.0
+
+
+def test_zero_surface_iv_percentile_is_preserved() -> None:
+    report = assess_option_quality(
+        _candidate(
+            surface_efficiency_score=50.0,
+            surface_required_move_ratio=1.0,
+            surface_iv_percentile=0.0,
+            surface_context={
+                "surface_efficiency_score": 50.0,
+                "surface_iv_percentile": 90.0,
+            },
+        )
+    )
+    assert report["metrics"]["iv_percentile"] == 0.0
+    assert "iv_percentile_expensive" not in report["warnings"]
