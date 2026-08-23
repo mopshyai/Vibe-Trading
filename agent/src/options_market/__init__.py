@@ -46,6 +46,12 @@ from .ev import (
     choose_score_threshold,
     empirical_expected_value,
 )
+from .experiments import (
+    ExperimentLineage,
+    HistoricalExperimentConfig,
+    run_historical_research_experiment,
+    summarize_historical_experiment,
+)
 from .outcomes import OutcomeConfig, calibrate_score_buckets, label_long_option_path
 from .paper_execution import (
     PaperExecutionConfig,
@@ -83,6 +89,8 @@ __all__ = [
     "DatabentoHistoricalAdapter",
     "DatabentoHistoricalConfig",
     "ExpectedValueConfig",
+    "ExperimentLineage",
+    "HistoricalExperimentConfig",
     "MarketPhase",
     "OSIContract",
     "OptionQualityConfig",
@@ -134,8 +142,10 @@ __all__ = [
     "regime_direction_fit",
     "replay_many",
     "replay_selection_at",
+    "run_historical_research_experiment",
     "scan_market_frames",
     "score_catalysts",
     "submit_paper_option_order",
+    "summarize_historical_experiment",
     "weekday_regular_session",
 ]
