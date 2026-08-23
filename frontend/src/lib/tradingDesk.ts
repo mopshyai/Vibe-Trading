@@ -154,6 +154,38 @@ export interface TradingDeskJournalEntry {
   realized_pnl_usd?: number | null;
 }
 
+export interface AttributionStats {
+  samples: number;
+  target_hit_rate: number;
+  touch_2x_rate: number;
+  full_loss_proxy_rate: number;
+  mean_end_return_pct?: number | null;
+  median_max_multiple?: number | null;
+  mean_mfe_pct?: number | null;
+  mean_mae_pct?: number | null;
+}
+
+export interface AttributionBucket extends AttributionStats {
+  bucket: string;
+}
+
+export interface TradingDeskAttribution {
+  samples: number;
+  missed_opportunities: number;
+  avoided_losses: number;
+  overall?: AttributionStats;
+  by_source_stage: Array<AttributionStats & { source_stage: string }>;
+  reason_attribution: Array<AttributionStats & { reason: string }>;
+  surface_attribution: {
+    efficiency_bucket: AttributionBucket[];
+    required_move_bucket: AttributionBucket[];
+    term_structure: AttributionBucket[];
+    skew: AttributionBucket[];
+    implied_vs_realized: AttributionBucket[];
+  };
+  warning: string;
+}
+
 async function json<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: authHeaders() });
   if (!response.ok) {
@@ -185,4 +217,8 @@ export const tradingDeskApi = {
       `/api/trading-desk/journal?${query.toString()}`,
     );
   },
+  getAttribution: (limit = 2000) =>
+    json<{ status: string; attribution: TradingDeskAttribution }>(
+      `/api/trading-desk/attribution?limit=${encodeURIComponent(String(limit))}`,
+    ),
 };
