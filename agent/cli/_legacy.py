@@ -960,6 +960,10 @@ def _format_tool_result_preview(tool: str, status: str, preview: str) -> str:
 
 _PROPOSAL_TOOL_NAME = "propose_mandate_profiles"
 _PROPOSAL_ID_RE = re.compile(r'"proposal_id"\s*:\s*"(mp_[0-9a-f]{32})"')
+_SCHEDULED_PROPOSAL_TOOL_NAME = "scheduled_research"
+_SCHEDULED_PROPOSAL_ID_RE = re.compile(
+    r'"proposal_id"\s*:\s*"(srp_[0-9a-f]{32})"'
+)
 
 
 def _load_full_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
@@ -1016,6 +1020,21 @@ def _mandate_proposal_from_tool_result(data: Dict[str, Any]) -> Optional[Dict[st
     if not match:
         return None
     return _load_full_proposal(match.group(1))
+
+
+def _scheduled_proposal_from_tool_result(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Recover the full scheduled-research proposal from a tool preview."""
+    if data.get("tool") != _SCHEDULED_PROPOSAL_TOOL_NAME or data.get("status") != "ok":
+        return None
+    match = _SCHEDULED_PROPOSAL_ID_RE.search(str(data.get("preview") or ""))
+    if not match:
+        return None
+    try:
+        from src.scheduled_research.proposals import load_proposal
+
+        return load_proposal(match.group(1))
+    except Exception:  # noqa: BLE001 - relay must never break the turn
+        return None
 
 
 def _ensure_session_id(title: str, *, session_id: Optional[str] = None) -> str:
@@ -1116,6 +1135,8 @@ def _run_agent(
         # the tool_result still flows on to the dashboard / no-rich printers.
         if event_type == "tool_result" and proposal_sink is not None:
             proposal = _mandate_proposal_from_tool_result(data)
+            if proposal is None:
+                proposal = _scheduled_proposal_from_tool_result(data)
             if proposal is not None:
                 try:
                     proposal_sink(proposal)
@@ -1842,6 +1863,7 @@ def _print_help() -> None:
         ("/swarm list", "List team run history"),
         ("/swarm show <run_id>", "Show a team run"),
         ("/swarm cancel <run_id>", "Cancel a team run"),
+        ("/swarm retry <run_id> [--resume]", "Retry a team run or resume a failed one"),
         ("/sessions", "List chat sessions"),
         ("/settings", "Show provider, model, timeout, and credentials"),
         ("/stop", "How to gracefully cancel a running agent"),
@@ -2008,6 +2030,14 @@ def _handle_swarm_command(arg: str) -> None:
             cmd_swarm_cancel(sub_arg)
         else:
             console.print("[red]Usage: /swarm cancel <run_id>[/red]")
+    elif sub == "retry":
+        retry_parts = sub_arg.split()
+        if len(retry_parts) == 1:
+            cmd_swarm_retry_live(retry_parts[0])
+        elif len(retry_parts) == 2 and retry_parts[1] == "--resume":
+            cmd_swarm_retry_live(retry_parts[0], resume=True)
+        else:
+            console.print("[red]Usage: /swarm retry <run_id> [--resume][/red]")
     else:
         console.print(f"[red]Unknown swarm command: {sub}[/red]")
 
@@ -2158,6 +2188,9 @@ class _SwarmDashboard:
             summary = data.get("summary", "")
             if summary:
                 self.completed_summaries.append((agent["name"], summary))
+        elif etype == "task_resumed":
+            agent["status"] = "resumed"
+            agent["tool"] = "kept"
         elif etype == "task_failed":
             agent["status"] = "failed"
             agent["elapsed"] = (time.monotonic() - agent["started_at"]) if agent["started_at"] else 0
@@ -2226,6 +2259,9 @@ class _SwarmDashboard:
             elif status == "done":
                 status_str = "[green][\u2713 done  ][/green]"
                 elapsed = agent["elapsed"]
+            elif status == "resumed":
+                status_str = "[green][\u2713 kept  ][/green]"
+                elapsed = agent["elapsed"]
             elif status == "failed":
                 status_str = "[red][\u2717 failed][/red]"
                 elapsed = agent["elapsed"]
@@ -2246,7 +2282,7 @@ class _SwarmDashboard:
             table.add_row(styled_name, status_str, agent["tool"], time_str, iter_str, last_text)
 
         # Progress bar row
-        done_count = sum(1 for a in self.agents.values() if a["status"] in ("done", "failed", "cancelled"))
+        done_count = sum(1 for a in self.agents.values() if a["status"] in ("done", "resumed", "failed", "cancelled"))
         total_count = len(self.agents) or 1
         pct = int(done_count / total_count * 100)
         bar_width = 40
@@ -2272,13 +2308,72 @@ class _SwarmDashboard:
         return table
 
 
+def _watch_swarm_run(store, runtime, run, dashboard: _SwarmDashboard) -> Optional[int]:
+    """Keep the CLI alive while a swarm run streams to its dashboard."""
+    from rich.live import Live
+    from src.swarm.models import RunStatus
+
+    dashboard.run_id = run.id
+
+    with Live(dashboard.build_table(), console=console, refresh_per_second=4, transient=False) as live:
+        try:
+            while True:
+                time.sleep(0.25)
+                live.update(dashboard.build_table())
+                current = store.load_run(run.id)
+                if current is None:
+                    console.print("[red]Run record lost[/red]")
+                    return
+                if current.status in (RunStatus.completed, RunStatus.failed, RunStatus.cancelled):
+                    dashboard.finished = True
+                    dashboard.final_status = current.status.value
+                    live.update(dashboard.build_table())
+                    break
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelling...[/yellow]")
+            runtime.cancel_run(run.id)
+            time.sleep(1)
+            current = store.load_run(run.id)
+
+    if current is None:
+        return
+
+    for agent_name, summary in dashboard.completed_summaries:
+        style = _get_agent_style(agent_name)
+        console.print(f"\n[{style}]\u2500\u2500 {agent_name} \u2500\u2500[/{style}]")
+        lines = summary.strip().split("\n")
+        preview = "\n".join(lines[:8])
+        if len(lines) > 8:
+            preview += "\n[dim]...[/dim]"
+        console.print(preview)
+
+    status_color = {
+        RunStatus.completed: "green",
+        RunStatus.failed: "red",
+        RunStatus.cancelled: "yellow",
+    }.get(current.status, "dim")
+
+    elapsed_total = time.monotonic() - dashboard.start_time
+    mins, secs = divmod(int(elapsed_total), 60)
+
+    tokens_in = current.total_input_tokens
+    tokens_out = current.total_output_tokens
+    token_str = ""
+    if tokens_in or tokens_out:
+        token_str = f"\nTokens: ~{tokens_in + tokens_out:,} (in: {tokens_in:,} out: {tokens_out:,})"
+
+    if current.final_report:
+        console.print("\n[bold]\u2500\u2500 Final Report \u2500\u2500[/bold]")
+        console.print(current.final_report[:2000])
+
+    console.print(f"\n[{status_color}]{current.status.value.upper()}[/{status_color}]  Time: {mins}m {secs}s{token_str}")
+
+
 def cmd_swarm_run_live(preset: str, vars_json: Optional[str] = None) -> Optional[int]:
     """Run a swarm preset with Rich Live dashboard."""
-    from rich.live import Live
     from src.config import load_swarm_agent_config
     from src.swarm.runtime import SwarmRuntime
     from src.swarm.store import SwarmStore
-    from src.swarm.models import RunStatus
 
     user_vars: Dict[str, str] = {}
     if vars_json:
@@ -2313,63 +2408,60 @@ def cmd_swarm_run_live(preset: str, vars_json: Optional[str] = None) -> Optional
         console.print(f"[red]DAG validation failed: {exc}[/red]")
         return
 
-    dashboard.run_id = run.id
+    return _watch_swarm_run(store, runtime, run, dashboard)
 
-    with Live(dashboard.build_table(), console=console, refresh_per_second=4, transient=False) as live:
-        try:
-            while True:
-                time.sleep(0.25)
-                live.update(dashboard.build_table())
-                current = store.load_run(run.id)
-                if current is None:
-                    console.print("[red]Run record lost[/red]")
-                    return
-                if current.status in (RunStatus.completed, RunStatus.failed, RunStatus.cancelled):
-                    dashboard.finished = True
-                    dashboard.final_status = current.status.value
-                    live.update(dashboard.build_table())
-                    break
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Cancelling...[/yellow]")
-            runtime.cancel_run(run.id)
-            time.sleep(1)
-            current = store.load_run(run.id)
 
-    if current is None:
-        return
+def cmd_swarm_retry_live(run_id: str, resume: bool = False) -> Optional[int]:
+    """Retry a prior swarm run, optionally keeping completed tasks."""
+    from src.config import load_swarm_agent_config
+    from src.swarm.models import RunStatus
+    from src.swarm.runtime import SwarmRuntime
+    from src.swarm.store import SwarmStore
 
-    # Print completed agent summaries
-    for agent_name, summary in dashboard.completed_summaries:
-        style = _get_agent_style(agent_name)
-        console.print(f"\n[{style}]\u2500\u2500 {agent_name} \u2500\u2500[/{style}]")
-        # Truncate to first meaningful chunk
-        lines = summary.strip().split("\n")
-        preview = "\n".join(lines[:8])
-        if len(lines) > 8:
-            preview += "\n[dim]...[/dim]"
-        console.print(preview)
+    store = SwarmStore(base_dir=SWARM_DIR)
+    try:
+        loaded = store.load_run(run_id)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return EXIT_USAGE_ERROR
+    if loaded is None:
+        console.print(f"[red]Run {run_id} not found[/red]")
+        return EXIT_USAGE_ERROR
 
-    # Final report
-    status_color = {
-        RunStatus.completed: "green",
-        RunStatus.failed: "red",
-        RunStatus.cancelled: "yellow",
-    }.get(current.status, "dim")
+    reconciled = store.reconcile_run(loaded, write=True)
+    if reconciled.status == RunStatus.running:
+        console.print("[red]Cannot retry a running run. Cancel or reap it first.[/red]")
+        return EXIT_USAGE_ERROR
+    if resume and reconciled.status not in (RunStatus.failed, RunStatus.cancelled):
+        console.print(
+            f"[red]Cannot resume a run in status '{reconciled.status.value}'; "
+            "resume only applies to failed or cancelled runs.[/red]"
+        )
+        return EXIT_USAGE_ERROR
 
-    elapsed_total = time.monotonic() - dashboard.start_time
-    mins, secs = divmod(int(elapsed_total), 60)
+    runtime = SwarmRuntime(store=store, agent_config=load_swarm_agent_config())
+    _agent_color_map.clear()
+    action = "Resuming swarm" if resume else "Retrying swarm"
+    console.print(f"\n[dim]{action}:[/dim] [cyan]{reconciled.preset_name}[/cyan]")
+    console.print(f"[dim]Source run:[/dim] {run_id}")
 
-    tokens_in = current.total_input_tokens
-    tokens_out = current.total_output_tokens
-    token_str = ""
-    if tokens_in or tokens_out:
-        token_str = f"\nTokens: ~{tokens_in + tokens_out:,} (in: {tokens_in:,} out: {tokens_out:,})"
+    dashboard = _SwarmDashboard(reconciled.preset_name, "")
+    try:
+        run = runtime.start_run(
+            reconciled.preset_name,
+            reconciled.user_vars or {},
+            live_callback=dashboard.handle_event,
+            include_shell_tools=True,
+            resume_from=reconciled if resume else None,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return EXIT_USAGE_ERROR
+    except ValueError as exc:
+        console.print(f"[red]DAG validation failed: {exc}[/red]")
+        return EXIT_USAGE_ERROR
 
-    if current.final_report:
-        console.print("\n[bold]\u2500\u2500 Final Report \u2500\u2500[/bold]")
-        console.print(current.final_report[:2000])
-
-    console.print(f"\n[{status_color}]{current.status.value.upper()}[/{status_color}]  Time: {mins}m {secs}s{token_str}")
+    return _watch_swarm_run(store, runtime, run, dashboard)
 
 
 # ---------------------------------------------------------------------------
@@ -4273,6 +4365,7 @@ def cmd_connector_configure(
 def cmd_connector_check(
     profile_id: Optional[str] = None,
     *,
+    connection_id: str | None = None,
     host: str | None = None,
     port: int | None = None,
     client_id: int | None = None,
@@ -4283,7 +4376,15 @@ def cmd_connector_check(
 
     try:
         profile = _selected_profile_or(profile_id)
-        report = check_connection(profile.id, host=host, port=port, client_id=client_id, account=account)
+        options = {
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "account": account,
+        }
+        if connection_id is not None:
+            options["connection_id"] = connection_id
+        report = check_connection(profile.id, **options)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Connector check failed:[/red] {exc}")
         return EXIT_RUN_FAILED
@@ -4345,6 +4446,78 @@ def cmd_connector_check(
         console.print(f"[red]{rich_escape(str(report.get('error') or report.get('status') or 'not ready'))}[/red]")
         return EXIT_RUN_FAILED
     console.print("[green]Connector profile is ready.[/green]")
+    return EXIT_SUCCESS
+
+
+def cmd_connector_setup(
+    profile_id: str,
+    *,
+    connection_id: str | None = None,
+    label: str | None = None,
+    skip_check: bool = False,
+) -> int:
+    """Create a local read-only connection and collect secrets outside AI prompts."""
+    from src.trading.connections import (
+        ConnectionStore,
+        credential_field_catalog,
+        is_portfolio_connection_profile,
+    )
+    from src.trading.profiles import profile_by_id
+    from src.trading.service import check_connection
+
+    try:
+        profile = profile_by_id(profile_id)
+        if not is_portfolio_connection_profile(profile):
+            raise ValueError(f"{profile.id} is not a read-only portfolio profile")
+        local_id = str(connection_id or f"{profile.connector}-{profile.environment}").strip().lower()
+        store = ConnectionStore()
+        connection = store.ensure(local_id, profile.id, label or profile.label)
+        fields = credential_field_catalog(profile.id)
+        names = [str(field["name"]) for field in fields]
+        status = store.credentials.status(connection.id, names) if names else {}
+        values: dict[str, str] = {}
+        for field in fields:
+            name = str(field["name"])
+            required = bool(field.get("required", True))
+            while True:
+                saved = bool(status.get(name))
+                suffix = " [already saved; Enter keeps it]" if saved else ""
+                value = Prompt.ask(
+                    f"{field.get('label') or name}{suffix}",
+                    password=bool(field.get("secret", True)),
+                    default="",
+                    show_default=False,
+                )
+                if value:
+                    values[name] = value
+                    break
+                if saved or not required:
+                    break
+                console.print(f"[yellow]{field.get('label') or name} is required.[/yellow]")
+        if values:
+            store.credentials.save(connection.id, values)
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]Connector setup failed:[/red] {rich_escape(str(exc))}")
+        return EXIT_USAGE_ERROR
+
+    console.print(
+        f"[green]Local read-only connection ready[/green] "
+        f"{connection.id} [dim]({connection.profile_id})[/dim]"
+    )
+    if skip_check:
+        return EXIT_SUCCESS
+    try:
+        report = check_connection(profile.id, connection_id=connection.id)
+    except Exception as exc:  # noqa: BLE001 - return an actionable diagnostic
+        console.print(f"[red]Connection test failed:[/red] {rich_escape(str(exc))}")
+        return EXIT_RUN_FAILED
+    if report.get("status") != "ok":
+        console.print(
+            f"[red]Connection test failed:[/red] "
+            f"{rich_escape(str(report.get('error') or report.get('status')))}"
+        )
+        return EXIT_RUN_FAILED
+    console.print("[green]Connection test passed.[/green]")
     return EXIT_SUCCESS
 
 
@@ -4941,14 +5114,23 @@ def _dispatch_connector(args: argparse.Namespace) -> int:
             account=args.account,
             yes=args.yes,
         )
-    if sub == "check":
-        return cmd_connector_check(
+    if sub == "setup":
+        return cmd_connector_setup(
             args.profile,
-            host=args.host,
-            port=args.port,
-            client_id=args.client_id,
-            account=args.account,
+            connection_id=args.connection_id,
+            label=args.label,
+            skip_check=args.skip_check,
         )
+    if sub == "check":
+        options = {
+            "host": args.host,
+            "port": args.port,
+            "client_id": args.client_id,
+            "account": args.account,
+        }
+        if args.connection_id is not None:
+            options["connection_id"] = args.connection_id
+        return cmd_connector_check(args.profile, **options)
     if sub == "account":
         return cmd_connector_account(
             args.profile,
@@ -5050,6 +5232,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--swarm-list", action="store_true", help="List swarm runs")
     parser.add_argument("--swarm-show", metavar="RUN_ID", help="Show a swarm run")
     parser.add_argument("--swarm-cancel", metavar="RUN_ID", help="Cancel a swarm run")
+    parser.add_argument("--swarm-retry", metavar="RUN_ID", help="Retry a prior swarm run")
+    parser.add_argument("--swarm-resume", action="store_true", help="Keep completed tasks when retrying a swarm run")
 
     parser.add_argument("--sessions", action="store_true", help="List sessions")
     parser.add_argument("--session-chat", metavar="SESSION_ID", help="Continue a session chat")
@@ -5246,9 +5430,19 @@ def _build_parser() -> argparse.ArgumentParser:
     connector_configure.add_argument("--account", default=None)
     connector_configure.add_argument("-y", "--yes", action="store_true", help="Overwrite without prompting")
 
+    connector_setup = connector_subparsers.add_parser(
+        "setup",
+        help="Create a local read-only connection and securely collect its credentials",
+    )
+    _add_connector_profile_arg(connector_setup, required=True)
+    connector_setup.add_argument("--connection-id", default=None)
+    connector_setup.add_argument("--label", default=None)
+    connector_setup.add_argument("--skip-check", action="store_true")
+
     connector_check = connector_subparsers.add_parser("check", help="Check selected connector readiness")
     _add_connector_profile_arg(connector_check)
     _add_connector_local(connector_check)
+    connector_check.add_argument("--connection-id", default=None)
 
     connector_status = connector_subparsers.add_parser("status", help="Show selected connector status")
     _add_connector_profile_arg(connector_status)
@@ -6265,6 +6459,11 @@ def main(argv: list[str] | None = None) -> int:
         return _coerce_exit_code(cmd_swarm_show(args.swarm_show))
     if args.swarm_cancel:
         return _coerce_exit_code(cmd_swarm_cancel(args.swarm_cancel))
+    if args.swarm_retry:
+        return _coerce_exit_code(cmd_swarm_retry_live(args.swarm_retry, resume=args.swarm_resume))
+    if args.swarm_resume:
+        console.print("[red]--swarm-resume requires --swarm-retry RUN_ID[/red]")
+        return EXIT_USAGE_ERROR
 
     if args.sessions:
         return _coerce_exit_code(cmd_sessions())

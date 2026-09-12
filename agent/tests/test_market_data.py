@@ -10,6 +10,7 @@ network-free logic: source detection, row capping, JSON-safety, and the
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -59,12 +60,85 @@ from src.market_data import (
         ("GC=F", "yahoo"),  # gold future
         ("CL=F", "yahoo"),  # crude future
         ("EURUSD=X", "yahoo"),  # forex pair
-        ("JPY=X", "yahoo"),
+        ("JPY=X", "yahoo"),  # abbreviated forex pair
+        ("^SPX", "yahoo"),  # index (S&P 500)
+        ("^FTSE", "yahoo"),  # index (FTSE 100)
+        ("^VIX", "yahoo"),
         ("something_weird", "tushare"),  # documented fallback
     ],
 )
 def test_detect_source(code: str, expected: str) -> None:
     assert detect_source(code) == expected
+
+
+def test_yahoo_loader_accepts_futures_and_forex_suffixes() -> None:
+    """The yahoo direct loader must accept =F/=X, not just equity suffixes (#718)."""
+    from backtest.loaders.yahoo_loader import _is_supported
+
+    assert _is_supported("GC=F") is True
+    assert _is_supported("EURUSD=X") is True
+    assert _is_supported("AAPL.US") is True  # unchanged
+    assert _is_supported("TD.TO") is True
+    assert _is_supported("PNG.V") is True
+    assert _is_supported("600519.SH") is False  # A-share still not yahoo
+
+
+def test_yahoo_loader_accepts_index_symbols() -> None:
+    """^SPX-style index symbols must be served verbatim like =F/=X."""
+    from backtest.loaders.yahoo_loader import _is_supported
+
+    assert _is_supported("^SPX") is True
+    assert _is_supported("^GSPC") is True
+    assert _is_supported("^VIX") is True
+    assert _is_supported("^FTSE") is True
+
+
+def test_index_market_detection() -> None:
+    """^ symbols classify as index everywhere, not the a_share default."""
+    from backtest.engines._market_hooks import _detect_market, code_currency
+
+    assert _detect_market("^SPX") == "index"
+    assert _detect_market("^N225") == "index"
+    assert code_currency("^SPX").startswith("UNKNOWN")  # honest: index has no cash currency
+
+
+def test_forex_pair_x_classifies_as_forex_not_a_share() -> None:
+    """=X pairs must stop falling through to the a_share default (latent misroute)."""
+    from backtest.engines._market_hooks import _detect_market, code_currency
+
+    assert _detect_market("GBPUSD=X") == "forex"
+    assert code_currency("GBPUSD=X") == "USD"
+
+
+def test_abbreviated_fx_pair_x_classes_as_forex() -> None:
+    """JPY=X (USD/JPY abbreviation) must not fall to the a_share default."""
+    from backtest.engines._market_hooks import _detect_market, code_currency
+
+    assert _detect_market("JPY=X") == "forex"
+    assert _detect_market("EUR=X") == "forex"
+    # The hidden base (JPY=X is USD/JPY) is not derivable — honest UNKNOWN,
+    # not a wrong CNY.
+    assert code_currency("JPY=X") == "UNKNOWN:forex"
+
+
+def test_index_backtest_routes_to_global_equity_not_china_or_crypto() -> None:
+    """^SPX must never reach ChinaAEngine/CryptoEngine through the runner."""
+    from backtest.engines.global_equity import GlobalEquityEngine
+    from backtest.runner import _MARKET_TO_SOURCE, _create_market_engine, _detect_source
+
+    assert _detect_source("^SPX") == "yahoo"
+    engine = _create_market_engine("yahoo", {}, ["^SPX"])
+    assert isinstance(engine, GlobalEquityEngine)
+
+
+def test_composite_builds_index_rule_engine() -> None:
+    """A mixed book containing an index gets an index sub-engine, not a drop."""
+    from backtest.engines.global_equity import GlobalEquityEngine
+    from backtest.engines.composite import _build_rule_engines
+
+    engines = _build_rule_engines({}, ["^SPX"])
+    assert "index" in engines
+    assert isinstance(engines["index"], GlobalEquityEngine)
 
 
 def test_yahoo_loader_accepts_futures_and_forex_suffixes() -> None:
@@ -404,12 +478,24 @@ def test_fetch_loader_error_falls_through_to_unresolved() -> None:
 
 
 def test_fetch_missing_symbol_listed_as_unresolved() -> None:
+    class _OnlyALoader:
+        """Serves A.US on every source; B.US fails everywhere down the chain."""
+
+        def fetch(self, codes, start_date, end_date, interval="1D"):
+            idx = pd.to_datetime(["2026-01-01"])
+            idx.name = "trade_date"
+            return {
+                code: pd.DataFrame({"close": [1.0]}, index=idx)
+                for code in codes
+                if code == "A.US"
+            }
+
     out = fetch_market_data(
         codes=["A.US", "B.US"],
         start_date="2026-01-01",
         end_date="2026-01-02",
         source="yahoo",
-        loader_resolver=lambda src: _PartialLoader,
+        loader_resolver=lambda src: _OnlyALoader,
     )
     assert "A.US" in out
     assert out["_unresolved"] == ["B.US"]
@@ -500,10 +586,10 @@ def test_fetch_canadian_aliases_sibling_already_resolved() -> None:
     assert "HIVE.V" in out and "HIVE.TO" in out
     assert out["HIVE.V"] == out["HIVE.TO"]  # aliased — identical bars
     # The .V symbol must be aliased from the already-resolved .TO sibling:
-    # exactly one group fetch (both codes together), no separate re-fetch of
-    # the sibling after the fact.
-    assert len(calls) == 1
+    # the group fetch covered both codes, and any later chain attempts for the
+    # missing .V sibling returned nothing, so the alias is the only resolution.
     assert set(calls[0]) == {"HIVE.V", "HIVE.TO"}
+    assert all(call == ["HIVE.V"] for call in calls[1:])
     assert out["_provenance"]["HIVE.V"]["resolved_symbol"] == "HIVE.TO"
     assert out["_provenance"]["HIVE.V"]["venue_fallback"] is True
 
@@ -532,6 +618,137 @@ def test_ca_venue_sibling_swaps_suffix_only() -> None:
     assert _ca_venue_sibling("AAPL.US") is None
     assert _ca_venue_sibling("local:HIVE.V") is None
     assert _ca_venue_sibling("BTC-USDT") is None
+
+
+# --------------------------------------------------------------------------
+# MARKET_DATA_ORDER_* overrides — auto routing honors the configured order,
+# while explicit sources, local: codes and the chain-provider test hook keep
+# their existing semantics.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def a_share_tushare_first():
+    """Apply a tushare-first A-share order override, restore defaults after.
+
+    Env is managed manually (not via monkeypatch): the fixture's own teardown
+    must scrub the var and refresh BEFORE monkeypatch's later undo, otherwise
+    the chains would stay overridden for subsequent tests.
+    """
+    from backtest.loaders import registry
+
+    os.environ["MARKET_DATA_ORDER_A_SHARE"] = (
+        "tushare,tencent,mootdx,eastmoney,baostock,akshare,local"
+    )
+    registry.refresh_source_order_overrides()
+    try:
+        yield
+    finally:
+        os.environ.pop("MARKET_DATA_ORDER_A_SHARE", None)
+        registry.refresh_source_order_overrides()
+
+
+def test_fetch_auto_respects_source_order_override_head(
+    a_share_tushare_first,
+) -> None:
+    """auto mode starts at the override's head (tushare), not the default's."""
+    from backtest.loaders.base import NoAvailableSourceError
+
+    attempts: list[str] = []
+
+    def resolver(src: str):
+        attempts.append(src)
+        if src == "tushare":
+            return _StubLoader
+        raise NoAvailableSourceError(f"{src} unavailable in test")
+
+    out = fetch_market_data(
+        codes=["600519.SH"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="auto",
+        loader_resolver=resolver,
+    )
+    assert attempts[0] == "tushare"  # default head would be tencent
+    assert "_unresolved" not in out
+    assert "600519.SH" in out
+
+
+def test_fetch_explicit_source_stays_src_first_with_override(
+    a_share_tushare_first,
+) -> None:
+    """An explicit source= never gets reordered by the market's override."""
+    from backtest.loaders.base import NoAvailableSourceError
+
+    attempts: list[str] = []
+
+    def resolver(src: str):
+        attempts.append(src)
+        if src == "tencent":
+            return _StubLoader
+        raise NoAvailableSourceError(f"{src} unavailable in test")
+
+    out = fetch_market_data(
+        codes=["600519.SH"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="tencent",
+        loader_resolver=resolver,
+    )
+    assert attempts[0] == "tencent"
+    assert "tushare" not in attempts
+    assert "600519.SH" in out
+
+
+def test_fetch_local_prefix_unaffected_by_override(
+    a_share_tushare_first,
+) -> None:
+    """local: codes keep the local entry point — no-network sources are
+    exempt from reordering."""
+    seen: list[str] = []
+
+    def resolver(src: str):
+        seen.append(src)
+        return _LocalAliasLoader
+
+    out = fetch_market_data(
+        codes=["local:600519.SH"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="auto",
+        loader_resolver=resolver,
+    )
+    assert seen[0] == "local"
+    assert "_unresolved" not in out
+
+
+def test_fetch_chain_provider_hook_wins_over_override(
+    a_share_tushare_first,
+) -> None:
+    """The fallback_chain_provider test hook defines the chain; the override
+    must not leak its order in."""
+    from backtest.loaders.base import NoAvailableSourceError
+
+    attempts: list[str] = []
+
+    def resolver(src: str):
+        attempts.append(src)
+        if src == "eastmoney":
+            return _StubLoader
+        raise NoAvailableSourceError(f"{src} unavailable in test")
+
+    out = fetch_market_data(
+        codes=["600519.SH"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="auto",
+        loader_resolver=resolver,
+        fallback_chain_provider=lambda src: ["eastmoney"],
+    )
+    # Detected source first, then the hook's chain — never the override order.
+    assert attempts[:2] == ["tencent", "eastmoney"]
+    assert "tushare" not in attempts
+    assert "600519.SH" in out
 
 
 # --------------------------------------------------------------------------
@@ -572,3 +789,79 @@ def test_fetch_json_rejects_nan_via_allow_nan_false() -> None:
     )
     parsed = json.loads(payload)
     assert parsed["A.US"][0]["close"] is None
+
+
+def test_fetch_auto_partial_batch_retries_missing_symbols_down_chain() -> None:
+    """One 404 out of five must not strand the rest in _unresolved.
+
+    yahoo serves four of five US symbols and omits the fifth; the chain walk
+    must keep going with only the missing symbol so stooq can serve it, and
+    provenance must name the source each symbol actually came from.
+    """
+    idx = pd.to_datetime(["2026-01-01"])
+    idx.name = "trade_date"
+    stooq_calls: list[list[str]] = []
+
+    class _YahooPartialLoader:
+        def fetch(self, codes, start_date, end_date, interval="1D"):
+            return {
+                code: pd.DataFrame({"close": [1.0]}, index=idx)
+                for code in codes
+                if code != "MSFT.US"
+            }
+
+    class _StooqLoader:
+        def fetch(self, codes, start_date, end_date, interval="1D"):
+            stooq_calls.append(list(codes))
+            return {code: pd.DataFrame({"close": [2.0]}, index=idx) for code in codes}
+
+    def resolver(src: str):
+        return {"yahoo": _YahooPartialLoader, "stooq": _StooqLoader}[src]
+
+    out = fetch_market_data(
+        codes=["AAPL.US", "MSFT.US", "NVDA.US", "AMZN.US", "META.US"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="auto",
+        loader_resolver=resolver,
+        include_provenance=True,
+    )
+
+    prov = out["_provenance"]
+    assert "_unresolved" not in out
+    assert "MSFT.US" in out
+    assert stooq_calls == [["MSFT.US"]]
+    assert prov["MSFT.US"]["source"] == "stooq"
+    assert prov["MSFT.US"]["fallback_used"] is True
+    assert prov["AAPL.US"]["source"] == "yahoo"
+
+
+def test_fetch_auto_full_batch_never_touches_the_next_source() -> None:
+    """When the chain head serves everything, the walk stops as before."""
+    stooq_calls: list[list[str]] = []
+
+    class _YahooFullLoader:
+        def fetch(self, codes, start_date, end_date, interval="1D"):
+            idx = pd.to_datetime(["2026-01-01"])
+            idx.name = "trade_date"
+            return {code: pd.DataFrame({"close": [1.0]}, index=idx) for code in codes}
+
+    class _StooqLoader:
+        def fetch(self, codes, start_date, end_date, interval="1D"):
+            stooq_calls.append(list(codes))
+            idx = pd.to_datetime(["2026-01-01"])
+            idx.name = "trade_date"
+            return {code: pd.DataFrame({"close": [2.0]}, index=idx) for code in codes}
+
+    def resolver(src: str):
+        return {"yahoo": _YahooFullLoader, "stooq": _StooqLoader}[src]
+
+    out = fetch_market_data(
+        codes=["AAPL.US", "NVDA.US"],
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        source="auto",
+        loader_resolver=resolver,
+    )
+    assert stooq_calls == []
+    assert "AAPL.US" in out and "NVDA.US" in out

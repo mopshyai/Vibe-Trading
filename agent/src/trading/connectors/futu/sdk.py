@@ -27,9 +27,9 @@ DataFrame which we convert with ``to_dict("records")`` before field mapping.
 from __future__ import annotations
 
 import json
-import os
 import socket
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
@@ -234,8 +234,16 @@ def check_status(config: FutuConfig | None = None) -> dict[str, Any]:
         A health report dict.
     """
     cfg = config or load_config()
+    # ``connection_state``/``error_code``/``last_checked_at`` are the envelope
+    # /live/status reads through a closed vocabulary (live_routes.py
+    # _CONNECTION_STATES / _ERROR_CODES). Omitting them is not a cosmetic gap:
+    # the Web UI treats anything other than "connected"/"ready" as unavailable,
+    # so a working OpenD connection rendered as down. Same shape as longbridge.
     report: dict[str, Any] = {
         "status": "ok",
+        "connection_state": "connected",
+        "error_code": None,
+        "error": None,
         "config": _public_config(cfg),
         "sdk": {"package": "futu-api", "installed": futu_available()},
         "paper_guard": "trd_env_acc_list",
@@ -245,30 +253,42 @@ def check_status(config: FutuConfig | None = None) -> dict[str, Any]:
     gateway_open = tcp_port_open(cfg.host, cfg.port)
     report["gateway"] = {"host": cfg.host, "port": cfg.port, "open": gateway_open}
     if not gateway_open:
-        report["status"] = "error"
-        report["error"] = (
+        return _status_error(
+            report,
+            "network_unreachable",
             f"No Futu OpenD gateway is listening at {cfg.host}:{cfg.port}. "
-            "Start OpenD, log in, and confirm the API port."
+            "Start OpenD, log in, and confirm the API port.",
         )
-        return report
 
     if not report["sdk"]["installed"]:
-        report["status"] = "error"
-        report["error"] = "Optional dependency missing: install with `pip install futu-api`."
-        return report
+        return _status_error(
+            report,
+            "sdk_missing",
+            "Optional dependency missing: install with `pip install futu-api`.",
+        )
 
     try:
         snapshot = get_account_snapshot(cfg)
     except Exception as exc:  # noqa: BLE001 - health endpoint reports cleanly
-        report["status"] = "error"
-        report["error"] = str(exc)
-        return report
+        return _status_error(report, "broker_error", str(exc))
 
     report["account"] = {
         "profile": cfg.profile,
         "trd_env": cfg.trd_env_name,
         "acc_id": snapshot.get("acc_id"),
     }
+    report["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+    return report
+
+
+def _status_error(report: dict[str, Any], code: str, message: str) -> dict[str, Any]:
+    """Stamp a failed health report with the closed-vocabulary diagnostics."""
+    report.update(
+        status="error",
+        connection_state="error",
+        error_code=code,
+        error=message,
+    )
     return report
 
 
@@ -279,7 +299,16 @@ def get_account_snapshot(config: FutuConfig | None = None) -> dict[str, Any]:
     try:
         acc_id = _resolve_acc_id(cfg, trade_ctx)
         trd_env = _trd_env_enum(cfg)
-        rows = _records(_unwrap(trade_ctx.accinfo_query(trd_env=trd_env, acc_id=acc_id)))
+        result = trade_ctx.accinfo_query(trd_env=trd_env, acc_id=acc_id)
+        ret = result[0] if isinstance(result, (list, tuple)) and len(result) >= 2 else None
+        futu = _require_futu()
+        if ret is not None and ret != getattr(futu, "RET_OK", 0):
+            return {
+                "status": "error",
+                "error": f"futu accinfo_query failed: ret={ret} data={result[1]}",
+                "assets": [],
+            }
+        rows = _records(_unwrap(result))
         return {
             "status": "ok",
             "profile": cfg.profile,
@@ -298,7 +327,19 @@ def get_positions(config: FutuConfig | None = None) -> dict[str, Any]:
     try:
         acc_id = _resolve_acc_id(cfg, trade_ctx)
         trd_env = _trd_env_enum(cfg)
-        rows = _records(_unwrap(trade_ctx.position_list_query(trd_env=trd_env, acc_id=acc_id)))
+        result = trade_ctx.position_list_query(trd_env=trd_env, acc_id=acc_id)
+        ret = result[0] if isinstance(result, (list, tuple)) and len(result) >= 2 else None
+        futu = _require_futu()
+        if ret is not None and ret != getattr(futu, "RET_OK", 0):
+            # The mandate gate fails closed only on an explicit error, so a
+            # rejected query must not flatten into an empty position list
+            # (#1207 Phase 0).
+            return {
+                "status": "error",
+                "error": f"futu position_list_query failed: ret={ret} data={result[1]}",
+                "positions": [],
+            }
+        rows = _records(_unwrap(result))
         return {
             "status": "ok",
             "profile": cfg.profile,
@@ -374,7 +415,12 @@ def get_historical_bars(
     limit: int = 90,
     **_: Any,
 ) -> dict[str, Any]:
-    """Fetch historical K-line bars for ``symbol`` (e.g. ``US.AAPL``)."""
+    """Fetch historical K-line bars for ``symbol`` (e.g. ``US.AAPL``).
+
+    Bars are forward-adjusted (Futu ``AuType.QFQ``, the SDK default, passed
+    explicitly so a futu-side default change cannot silently switch the
+    caliber). The response declares the caliber in ``adjustment``.
+    """
     cfg = config or load_config()
     futu = _require_futu()
     ktype_name = _KLTYPE_MAP.get(period.strip(), "K_DAY")
@@ -382,11 +428,16 @@ def get_historical_bars(
     quote_ctx = _quote_ctx(cfg)
     try:
         code = symbol.strip().upper()
-        rows = _records(_unwrap(quote_ctx.request_history_kline(code, ktype=ktype, max_count=int(limit))))
+        autype = getattr(getattr(futu, "AuType", None), "QFQ", None)
+        request: dict[str, Any] = {"ktype": ktype, "max_count": int(limit)}
+        if autype is not None:
+            request["autype"] = autype
+        rows = _records(_unwrap(quote_ctx.request_history_kline(code, **request)))
         return {
             "status": "ok",
             "symbol": code,
             "period": period,
+            "adjustment": "qfq",
             "bars": [_bar_to_dict(row) for row in rows],
         }
     finally:
@@ -1151,6 +1202,7 @@ def _account_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
         "market_val": _first(row, ("market_val",)),
         "available_funds": _first(row, ("available_funds",)),
         "securities_assets": _first(row, ("securities_assets",)),
+        "currency": str(_first(row, ("currency",), "") or "").upper(),
     }
 
 
@@ -1164,6 +1216,8 @@ def _position_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
         "pl_ratio": _first(row, ("pl_ratio",)),
         "pl_val": _first(row, ("pl_val",)),
         "position_side": str(_first(row, ("position_side",), "")),
+        "market": str(_first(row, ("position_market",), "") or "").upper(),
+        "currency": str(_first(row, ("currency",), "") or "").upper(),
     }
 
 

@@ -95,7 +95,11 @@ class PortfolioStore:
         return json.loads(row["payload"]) if row else None
 
     def history(
-        self, limit: int = 180, *, complete_only: bool = True
+        self,
+        limit: int = 180,
+        *,
+        complete_only: bool = True,
+        valuation_version: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return snapshot totals over time, oldest first.
 
@@ -105,22 +109,43 @@ class PortfolioStore:
                 enabled source refreshed successfully. Charting a mix of
                 complete and partial snapshots would draw a value drop that
                 never happened.
+            valuation_version: Restrict the series to snapshots produced by
+                one valuation methodology. Legacy rows are retained but cannot
+                create false changes beside a newer methodology.
 
         Returns:
             One row per snapshot with id, timestamp, completeness and totals.
         """
+        row_limit = max(1, min(int(limit), 2000))
         where = "WHERE complete = 1" if complete_only else ""
         with self._connect() as db:
             rows = db.execute(
                 f"""
-                SELECT id, created_at, complete, total_usd, total_cny
+                SELECT id, created_at, complete, total_usd, total_cny, payload
                 FROM portfolio_snapshots
                 {where}
                 ORDER BY created_at DESC LIMIT ?
                 """,
-                (max(1, min(int(limit), 2000)),),
+                (2000 if valuation_version is not None else row_limit,),
             ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        history = []
+        for row in rows:
+            if valuation_version is not None:
+                payload = json.loads(row["payload"])
+                if payload.get("valuation_version") != valuation_version:
+                    continue
+            history.append(
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "complete": row["complete"],
+                    "total_usd": row["total_usd"],
+                    "total_cny": row["total_cny"],
+                }
+            )
+            if len(history) >= row_limit:
+                break
+        return list(reversed(history))
 
     def latest_successful_source(self, source_id: str) -> dict[str, Any] | None:
         """Return the newest successfully read payload for one configured source.

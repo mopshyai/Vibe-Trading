@@ -352,8 +352,11 @@ def test_run_shadow_backtest_with_mocked_runner(
         artifacts_dir = run_path / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = artifacts_dir / "metrics.json"
+        # Same key set the real runner emits (agent/src/core/runner.py
+        # metrics_csv): final_value/total_return, no explicit PnL field.
         metrics_path.write_text(json.dumps({
-            "total_return_abs": 12_345.0,
+            "final_value": 1_012_345.0,
+            "total_return": 0.012345,
             "sharpe": 1.5,
             "max_drawdown": -0.12,
             "win_rate": 0.55,
@@ -382,9 +385,9 @@ def test_run_shadow_backtest_with_mocked_runner(
     assert isinstance(result, ShadowBacktestResult)
     assert result.shadow_id == profile.shadow_id
     assert set(result.per_market.keys()) == {"china_a", "hk", "us", "crypto"}
-    assert result.combined["total_return_abs"] == 12_345.0
+    assert result.combined["final_value"] == 1_012_345.0
     assert result.combined["sharpe"] == 1.5
-    assert result.shadow_total_pnl == 12_345.0
+    assert result.shadow_total_pnl == pytest.approx(12_345.0)
     assert result.real_total_pnl > 0  # all profitable test data
     assert result.delta_pnl == round(result.shadow_total_pnl - result.real_total_pnl, 2)
     assert isinstance(result.attribution, AttributionBreakdown)
@@ -414,8 +417,81 @@ def test_run_shadow_backtest_handles_runner_failure(
         run_backtest_fn=failing_runner,
     )
     assert result.combined.get("error")
-    assert result.shadow_total_pnl == 0.0
+    assert result.shadow_total_pnl is None
+    assert result.delta_pnl is None
     assert result.equity_curves == {}
+
+    from src.shadow_account.backtester import load_cached_result
+
+    cached = load_cached_result(profile, window_start="2026-01-01", window_end="2026-06-30")
+    assert cached is not None
+    assert cached.shadow_total_pnl is None
+    assert cached.delta_pnl is None
+
+
+@pytest.mark.unit
+def test_shadow_pnl_derivation_from_runner_metrics() -> None:
+    from src.shadow_account.backtester import _shadow_pnl_from_metrics
+
+    # The exact metrics from the reported bad case: a completed A-share run
+    # whose only PnL signal is final_value/total_return.
+    metrics = {"final_value": 834_141.8041331805, "total_return": -0.1658581958668195, "trade_count": 16.0}
+    assert _shadow_pnl_from_metrics(metrics, 1_000_000.0) == pytest.approx(-165_858.20, abs=0.01)
+    # total_return alone carries the same information.
+    assert _shadow_pnl_from_metrics({"total_return": -0.1658581958668195}, 1_000_000.0) == pytest.approx(
+        -165_858.20, abs=0.01
+    )
+    # Explicit keys win when present, and a genuine zero is kept as zero.
+    assert _shadow_pnl_from_metrics({"total_return_abs": 0.0}, 1_000_000.0) == 0.0
+    assert _shadow_pnl_from_metrics({"total_return_abs": 5.0, "final_value": 1.0}, 1_000_000.0) == 5.0
+    assert _shadow_pnl_from_metrics({"total_pnl": -7.5}, 1_000_000.0) == -7.5
+    # No PnL signal at all means unknown, not zero.
+    assert _shadow_pnl_from_metrics({"sharpe": 1.2}, 1_000_000.0) is None
+    assert _shadow_pnl_from_metrics({}, 1_000_000.0) is None
+
+
+@pytest.mark.unit
+def test_run_shadow_backtest_derives_pnl_from_final_value(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end form of the reported bad case: runner-schema metrics in,
+    a real negative Shadow PnL out, and the None state survives the cache."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+
+    def stub_run_backtest(run_dir_str: str) -> str:
+        run_path = Path(run_dir_str)
+        artifacts_dir = run_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = artifacts_dir / "metrics.csv"
+        metrics_path.write_text(
+            "final_value,total_return,annual_return,max_drawdown,sharpe,win_rate,trade_count\n"
+            "834141.8041331805,-0.1658581958668195,-0.17,-0.21,-0.9,0.31,16\n",
+            encoding="utf-8",
+        )
+        return json.dumps({
+            "status": "ok",
+            "exit_code": 0,
+            "artifacts": {"metrics.csv": str(metrics_path)},
+        })
+
+    result = run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        journal_path=profitable_journal,
+        run_backtest_fn=stub_run_backtest,
+    )
+    assert result.shadow_total_pnl == pytest.approx(-165_858.20, abs=0.01)
+    assert result.delta_pnl == round(result.shadow_total_pnl - result.real_total_pnl, 2)
+
+    from src.shadow_account.backtester import load_cached_result
+
+    cached = load_cached_result(profile, window_start="2026-01-01", window_end="2026-06-30")
+    assert cached is not None
+    assert cached.shadow_total_pnl == pytest.approx(-165_858.20, abs=0.01)
+    assert cached.delta_pnl == result.delta_pnl
 
 
 # ---------------- M3b: per-currency multi-market runs ----------------
@@ -545,7 +621,9 @@ def test_run_shadow_backtest_runs_once_per_currency(
     for call in calls:
         currencies = {code_currency(c) for c in call["codes"]}  # type: ignore[union-attr]
         assert len(currencies) == 1
-    assert (runs_dir(profile.shadow_id) / "shadow_result.json").exists()
+    from src.shadow_account.backtester import _cache_key
+    digest = _cache_key(profile, "2026-01-01", "2026-06-30")
+    assert (runs_dir(profile.shadow_id) / f"shadow_result_{digest}.json").exists()
     assert set(result.per_market.keys()) == {"china_a", "hk", "us", "crypto"}
 
 
@@ -675,9 +753,120 @@ def test_all_currency_groups_failure(
     )
     assert len(calls) == 3
     assert result.combined.get("error")
-    assert result.shadow_total_pnl == 0.0
+    assert result.shadow_total_pnl is None
+    assert result.delta_pnl is None
     assert result.equity_curves == {}
     assert all(row == {} for row in result.per_market.values())
+
+
+# ---------------- M3c: cash dividends in the journal ----------------
+
+def _journal_with_dividend(path: Path, *, include_dividend: bool = True) -> Path:
+    """One 600519 roundtrip plus (optionally) a 500-yuan 红利入账 cash row."""
+    rows = _make_tonghuashun_rows([
+        ("2026-01-02 10:30:00", "600519", "buy", 100.0, 10.0),
+        ("2026-01-05 14:15:00", "600519", "sell", 100.0, 10.2),
+    ])
+    if include_dividend:
+        rows.append({
+            "成交时间": "2026-01-10 09:00:00",
+            "证券代码": "600519",
+            "证券名称": "标的600519",
+            "操作": "红利入账",
+            "成交数量": 0.0,
+            "成交价格": 0.0,
+            "成交金额": 500.0,
+            "手续费": 0.0,
+            "印花税": 0.0,
+            "过户费": 0.0,
+        })
+    return _write_journal(path, rows)
+
+
+def _dividend_scenario_run(
+    profile: ShadowProfile, journal: Path, *, with_frame: bool,
+) -> ShadowBacktestResult:
+    """Run the shadow backtest over a dividend journal with a stub runner.
+
+    With ``with_frame`` the CNY pool also emits an ohlcv artifact for
+    600519.SH (constant closes, so the caliber factor is 1.0 and roundtrip
+    PnL is unchanged), which marks the symbol as frame-covered.
+    """
+    metrics = {
+        "CNY": {"total_return_abs": 1000.0, "sharpe": 1.0},
+        "HKD": {"total_return_abs": 200.0, "sharpe": 2.0},
+        "USD": {"total_return_abs": 300.0, "sharpe": 3.0},
+    }
+
+    def stub(run_dir_str: str) -> str:
+        run_path = Path(run_dir_str)
+        artifacts_dir = run_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = artifacts_dir / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(metrics[run_path.name]), encoding="utf-8",
+        )
+        if with_frame and run_path.name == "CNY":
+            (artifacts_dir / "ohlcv_600519.SH.csv").write_text(
+                "date,close\n"
+                "2026-01-01,10.0\n2026-01-02,10.0\n"
+                "2026-01-05,10.0\n2026-01-10,10.0\n",
+                encoding="utf-8",
+            )
+        return json.dumps({
+            "status": "ok", "exit_code": 0,
+            "artifacts": {"metrics.json": str(metrics_path)},
+        })
+
+    return run_shadow_backtest(
+        profile,
+        window_start="2026-01-01",
+        window_end="2026-06-30",
+        journal_path=journal,
+        run_backtest_fn=stub,
+    )
+
+
+@pytest.mark.unit
+def test_uncovered_symbol_dividend_raises_real_pnl_and_shrinks_missed(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+    plain = _journal_with_dividend(tmp_path / "journal_plain.csv", include_dividend=False)
+    with_div = _journal_with_dividend(tmp_path / "journal_div.csv")
+
+    baseline = _dividend_scenario_run(profile, plain, with_frame=False)
+    treated = _dividend_scenario_run(profile, with_div, with_frame=False)
+
+    assert treated.real_total_pnl == pytest.approx(baseline.real_total_pnl + 500.0)
+    # The roundtrip decomposition is untouched; only the residual absorbs it.
+    assert treated.attribution.noise_trades_pnl == baseline.attribution.noise_trades_pnl
+    assert treated.attribution.early_exit_pnl == baseline.attribution.early_exit_pnl
+    assert treated.attribution.missed_signals_pnl == pytest.approx(
+        baseline.attribution.missed_signals_pnl - 500.0
+    )
+
+
+@pytest.mark.unit
+def test_frame_covered_symbol_dividend_is_not_double_counted(
+    profitable_journal: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    profile = extract_shadow_profile(profitable_journal)
+    with_div = _journal_with_dividend(tmp_path / "journal_div.csv")
+
+    uncovered = _dividend_scenario_run(profile, with_div, with_frame=False)
+    covered = _dividend_scenario_run(profile, with_div, with_frame=True)
+
+    # The dividend is already embedded in the adjusted price caliber for a
+    # frame-covered symbol, so the cash must not be added on top of it.
+    assert covered.real_total_pnl == pytest.approx(uncovered.real_total_pnl - 500.0)
+    assert covered.attribution.missed_signals_pnl == pytest.approx(
+        uncovered.attribution.missed_signals_pnl + 500.0
+    )
 
 
 # ---------------- M4: Reporter ----------------
@@ -753,12 +942,16 @@ def test_render_shadow_report_handles_empty_equity(
             missed_signals_pnl=0.0, noise_trades_pnl=0.0, early_exit_pnl=0.0,
             late_exit_pnl=0.0, overtrading_pnl=0.0, counterfactual_trades=(),
         ),
-        shadow_total_pnl=0.0, real_total_pnl=0.0, delta_pnl=0.0,
+        shadow_total_pnl=None, real_total_pnl=0.0, delta_pnl=None,
     )
     out = render_shadow_report(profile, result, output_dir=tmp_path)
     assert Path(out["html_path"]).exists()
+    content = Path(out["html_path"]).read_text(encoding="utf-8")
+    # An unknown shadow PnL renders as unavailable, never as a fake 0.00.
+    assert "unavailable" in content
+    assert "did not produce usable metrics" in content
     # Section 6 should degrade gracefully when no counterfactuals exist.
-    assert "No material counterfactual" in Path(out["html_path"]).read_text(encoding="utf-8")
+    assert "No material counterfactual" in content
 
 
 @pytest.mark.unit
@@ -949,6 +1142,9 @@ def test_attribution_is_zero_without_journal(
     assert result.attribution.noise_trades_pnl == 0.0
     assert result.real_total_pnl == 0.0
     assert result.attribution.counterfactual_trades == ()
+    # An explicit zero PnL is a real measurement, not a missing value.
+    assert result.shadow_total_pnl == 0.0
+    assert result.delta_pnl == 0.0
 
 
 # ---------------- Price-context features (as-of buy_dt) ----------------
@@ -1175,7 +1371,8 @@ def test_promoted_features_threshold() -> None:
     promoted = _promoted_numeric_features(df, min_support=3)
     assert "prior_5d_return" in promoted  # 4 >= 3
     assert "entry_rsi14" not in promoted  # 2 < 3
-    assert set(_MARKET_KEY_MAP) == {"china_a", "us", "hk", "crypto"}
+    assert set(_MARKET_KEY_MAP) == {"china_a", "us", "hk", "uk", "crypto"}
+    assert _MARKET_KEY_MAP["uk"] == "uk_equity"
 
 
 @pytest.mark.unit

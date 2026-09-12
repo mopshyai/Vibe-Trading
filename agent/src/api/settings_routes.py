@@ -100,6 +100,24 @@ class LLMModelsResponse(BaseModel):
     warning_code: Optional[ModelDiscoveryWarningCode] = None
 
 
+class SourceOrderEntry(BaseModel):
+    """One market's fallback-chain order (default + override state)."""
+
+    market: str
+    env_var: str
+    default_order: List[str]
+    effective_order: List[str]
+    override: Optional[List[str]] = None
+    override_invalid: bool = False
+
+
+class SourceOrderUpdate(BaseModel):
+    """Reorder one market's fallback chain (null/empty order = reset)."""
+
+    market: str
+    order: Optional[List[str]] = None
+
+
 class DataSourceSettingsResponse(BaseModel):
     """Current data source credential settings."""
 
@@ -109,6 +127,7 @@ class DataSourceSettingsResponse(BaseModel):
     baostock_installed: bool
     baostock_message: str
     env_path: str
+    source_orders: List[SourceOrderEntry] = Field(default_factory=list)
 
 
 class UpdateDataSourceSettingsRequest(BaseModel):
@@ -116,6 +135,7 @@ class UpdateDataSourceSettingsRequest(BaseModel):
 
     tushare_token: Optional[str] = None
     clear_tushare_token: bool = False
+    source_orders: Optional[List[SourceOrderUpdate]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +400,70 @@ def _build_llm_settings_response(
     )
 
 
+def _build_source_orders(env_values: Dict[str, str]) -> List[SourceOrderEntry]:
+    """Build per-market source-order entries for the settings payload.
+
+    ``effective_order`` reflects the running process (registry state after a
+    refresh); ``override`` reflects the persisted dotenv value, with
+    ``override_invalid`` flagging values that failed validation (kept in the
+    file for transparency, but not applied).
+    """
+    from backtest.loaders import registry
+
+    registry.refresh_source_order_overrides()
+    entries: List[SourceOrderEntry] = []
+    for market in sorted(registry._DEFAULT_CHAINS):
+        env_var = registry.source_order_env_var(market)
+        default_order = registry.get_default_source_order(market)
+        parsed = registry.parse_source_order(env_values.get(env_var, ""))
+        entries.append(
+            SourceOrderEntry(
+                market=market,
+                env_var=env_var,
+                default_order=default_order,
+                effective_order=list(registry.FALLBACK_CHAINS.get(market, default_order)),
+                override=parsed or None,
+                override_invalid=bool(parsed)
+                and not registry.is_valid_source_order(market, parsed),
+            )
+        )
+    return entries
+
+
+def _validate_source_order_update(entry: SourceOrderUpdate) -> tuple[str, str]:
+    """Validate one market reorder; return ``(env_var, dotenv value)``.
+
+    A null/empty order — or one equal to the default — maps to an empty
+    string, which clears any persisted override for that market.
+    """
+    from backtest.loaders import registry
+
+    market = entry.market.strip()
+    default_order = registry.get_default_source_order(market)
+    if not default_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown market: {market!r}",
+        )
+    order = (
+        [name.strip().lower() for name in entry.order if name.strip()]
+        if entry.order
+        else []
+    )
+    if order and not registry.is_valid_source_order(market, order):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid source order for {market}: must be a permutation of "
+                f"the default chain {default_order}"
+            ),
+        )
+    return (
+        registry.source_order_env_var(market),
+        "" if not order or order == default_order else ",".join(order),
+    )
+
+
 def _build_data_source_settings_response(
     values: Optional[Dict[str, str]] = None,
 ) -> DataSourceSettingsResponse:
@@ -406,6 +490,7 @@ def _build_data_source_settings_response(
         baostock_installed=installed,
         baostock_message=baostock_message,
         env_path=host._project_relative_path(host.ENV_PATH),
+        source_orders=_build_source_orders(env_values),
     )
 
 
@@ -675,6 +760,19 @@ def register_settings_routes(
         elif "TUSHARE_TOKEN" in current_values:
             updates["TUSHARE_TOKEN"] = current_values["TUSHARE_TOKEN"]
 
+        # Per-market source-order overrides: validate first (400 on a bad
+        # permutation *before* anything is persisted), then merge only the
+        # entries that actually change the dotenv (no-op saves don't grow
+        # the file with 12 identical lines).
+        order_updates: Dict[str, str] = {}
+        if payload.source_orders is not None:
+            for order_entry in payload.source_orders:
+                env_var, value = _validate_source_order_update(order_entry)
+                order_updates[env_var] = value
+            for env_var, value in order_updates.items():
+                if value != current_values.get(env_var, ""):
+                    updates[env_var] = value
+
         if updates:
             saved_values = _persist_settings_updates(updates)
             token = updates.get("TUSHARE_TOKEN", "").strip()
@@ -682,6 +780,16 @@ def register_settings_routes(
                 os.environ["TUSHARE_TOKEN"] = token
             else:
                 os.environ.pop("TUSHARE_TOKEN", None)
+            # Hot-apply source-order overrides in this process.
+            for env_var, value in order_updates.items():
+                if value:
+                    os.environ[env_var] = value
+                else:
+                    os.environ.pop(env_var, None)
+            if order_updates:
+                from backtest.loaders import registry
+
+                registry.refresh_source_order_overrides()
             reset_env_config()
 
         return _build_data_source_settings_response(

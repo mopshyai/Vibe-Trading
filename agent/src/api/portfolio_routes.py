@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 from copy import deepcopy
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -13,6 +16,17 @@ from src.portfolio.service import PortfolioService
 
 _REFRESH_LOCK = threading.Lock()
 _REFRESH_OPERATION_LOCK = threading.Lock()
+_RECONNECT_OPERATION_LOCK = threading.Lock()
+_RECONNECT_STATE_LOCK = threading.Lock()
+_RECONNECT_TIMEOUT_SECONDS = 330
+_RECONNECT_STATE = {
+    "running": False,
+    "source_id": None,
+    "status": "idle",
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
 _REFRESH_STATE = {
     "running": False,
     "current": None,
@@ -44,6 +58,64 @@ def _set_refresh_progress(source_id: str, status: str, error: str | None) -> Non
     with _REFRESH_LOCK:
         _REFRESH_STATE["current"] = source_id if status == "refreshing" else None
         _REFRESH_STATE["sources"][source_id] = {"status": status, "error": error}
+
+
+def _reconnect_snapshot() -> dict:
+    with _RECONNECT_STATE_LOCK:
+        return deepcopy(_RECONNECT_STATE)
+
+
+def _set_reconnect_state(**updates) -> None:
+    with _RECONNECT_STATE_LOCK:
+        _RECONNECT_STATE.update(updates)
+
+
+def _stop_reconnect_process(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _run_reconnect(source_id: str) -> None:
+    process = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "src.portfolio.oauth_worker", source_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return_code = process.wait(timeout=_RECONNECT_TIMEOUT_SECONDS)
+        if return_code == 0:
+            _set_reconnect_state(status="authorized", error=None)
+        else:
+            _set_reconnect_state(
+                status="error",
+                error="Authorization did not complete. Close the old broker authorization tab and reconnect.",
+            )
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            _stop_reconnect_process(process)
+        _set_reconnect_state(
+            status="timeout",
+            error="Authorization timed out. The callback server was closed and reconnect is safe to retry.",
+        )
+    except Exception:
+        if process is not None and process.poll() is None:
+            _stop_reconnect_process(process)
+        _set_reconnect_state(
+            status="error", error="Unable to start the local authorization process."
+        )
+    finally:
+        _set_reconnect_state(
+            running=False,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _RECONNECT_OPERATION_LOCK.release()
 
 
 def register_portfolio_routes(app: FastAPI) -> None:
@@ -106,12 +178,54 @@ def register_portfolio_routes(app: FastAPI) -> None:
     @app.post(
         "/api/portfolio/sources/{source_id}/reconnect",
         dependencies=[Depends(require_auth)],
+        status_code=202,
     )
     def reconnect_portfolio_source(source_id: str):
+        if not _RECONNECT_OPERATION_LOCK.acquire(blocking=False):
+            raise HTTPException(
+                status_code=409, detail="portfolio reconnect already running"
+            )
         try:
-            return service().reconnect_source(source_id)
+            service().reconnect_target(source_id)
         except RuntimeError as exc:
+            _RECONNECT_OPERATION_LOCK.release()
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            _RECONNECT_OPERATION_LOCK.release()
+            raise HTTPException(
+                status_code=503, detail="Unable to load the local OAuth configuration"
+            ) from exc
+        _set_reconnect_state(
+            running=True,
+            source_id=source_id,
+            status="authorizing",
+            error=None,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,
+        )
+        try:
+            threading.Thread(
+                target=_run_reconnect,
+                args=(source_id,),
+                daemon=True,
+                name=f"portfolio-oauth-{source_id}",
+            ).start()
+        except Exception:
+            _RECONNECT_OPERATION_LOCK.release()
+            _set_reconnect_state(
+                running=False,
+                status="error",
+                error="Unable to start the local authorization task.",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            raise HTTPException(
+                status_code=503, detail="Unable to start the local authorization task"
+            )
+        return {"status": "started", "reconnect": _reconnect_snapshot()}
+
+    @app.get("/api/portfolio/reconnect-status", dependencies=[Depends(require_auth)])
+    def portfolio_reconnect_status():
+        return {"status": "ok", "reconnect": _reconnect_snapshot()}
 
     @app.get("/api/portfolio/settings", dependencies=[Depends(require_auth)])
     def portfolio_settings():

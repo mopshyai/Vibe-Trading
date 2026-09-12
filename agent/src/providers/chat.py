@@ -5,7 +5,9 @@ ChatLLM is designed specifically for the AgentLoop ReAct cycle.
 
 from __future__ import annotations
 
+import asyncio
 import html
+import inspect
 import logging
 import os
 import re
@@ -18,6 +20,33 @@ from src.providers.content_filter import is_content_filter_triggered
 from src.providers.llm import build_llm
 
 logger = logging.getLogger(__name__)
+
+_PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+_DIRECT_ANTHROPIC_LLM_TYPE = "anthropic-chat"
+
+
+def prompt_cache_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return a message list whose leading system string carries a cache breakpoint.
+
+    The system prompt is the end of the static prefix (tools render before it),
+    so a breakpoint there gives that prefix a guaranteed cache read point even
+    when later messages are edited by context compression. Anything other than
+    a leading ``{"role": "system", "content": <non-empty str>}`` is returned
+    unchanged, and the caller's list is never mutated.
+    """
+    if not messages:
+        return messages
+    first = messages[0]
+    if not isinstance(first, dict) or first.get("role") != "system":
+        return messages
+    content = first.get("content")
+    if not isinstance(content, str) or not content:
+        return messages
+    cached = dict(first)
+    cached["content"] = [
+        {"type": "text", "text": content, "cache_control": dict(_PROMPT_CACHE_CONTROL)}
+    ]
+    return [cached, *messages[1:]]
 
 
 def _dedupe_finish_reason(raw: str) -> str:
@@ -115,6 +144,22 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
 
+def _extract_retry_after_s(original: Exception) -> Optional[float]:
+    """Return the provider-suggested Retry-After delay in seconds, if any."""
+    response = getattr(original, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0.0 else None
+
+
 class ProviderStreamError(RuntimeError):
     """Raised when provider streaming fails before a complete response."""
 
@@ -125,11 +170,17 @@ class ProviderStreamError(RuntimeError):
             provider: Effective provider name.
             model: Effective model name.
             original: Original exception from the stream path.
+
+        Attributes:
+            retry_after_s: Provider-suggested Retry-After delay in seconds,
+                extracted from the original exception's response headers when
+                present and parseable as a non-negative number; otherwise None.
         """
         self.provider = provider
         self.model = model
         self.original = original
         self.status_code: Optional[int] = getattr(original, "status_code", None)
+        self.retry_after_s: Optional[float] = _extract_retry_after_s(original)
         safe_message = _redact_provider_error(str(original))
         hint = ""
         lowered = safe_message.lower()
@@ -298,25 +349,107 @@ class ChatLLM:
         )
 
     def close(self) -> None:
-        """Best-effort release of the underlying provider HTTP client.
+        """Best-effort release of HTTP clients owned by this adapter.
 
-        The LangChain adapter (ChatOpenAI and its OpenAI-compatible
-        subclasses) owns a pooled ``httpx.Client`` that is not guaranteed to
-        be refcount-collected promptly — cyclic references can defer it to a
-        GC pass. Long-running callers (swarm workers build one ChatLLM per
-        task) must call this when the instance is done with, or sockets
-        accumulate in CLOSE-WAIT. Safe to call multiple times; providers
-        without a closeable client are a no-op.
+        LangChain may lend multiple adapters the same cached HTTPX clients.
+        Those process-scoped clients must remain open when one ``ChatLLM`` is
+        discarded. Only explicitly marked, Vibe-created clients are closed;
+        adapters without the ownership marker keep the legacy best-effort
+        behavior for compatibility.
         """
+        for label, client in self._close_candidates():
+            close_fn = getattr(client, "aclose", None)
+            if not callable(close_fn):
+                close_fn = getattr(client, "close", None)
+            if not callable(close_fn):
+                continue
+            try:
+                result = close_fn()
+                if inspect.isawaitable(result):
+                    self._run_or_schedule_close(result, label)
+            except Exception:
+                logger.debug("ChatLLM.close: failed to close %s", label, exc_info=True)
+
+    async def aclose(self) -> None:
+        """Asynchronously release HTTP clients owned by this adapter."""
+        for label, client in self._close_candidates():
+            close_fn = getattr(client, "aclose", None)
+            if not callable(close_fn):
+                close_fn = getattr(client, "close", None)
+            if not callable(close_fn):
+                continue
+            try:
+                result = close_fn()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.debug("ChatLLM.aclose: failed to close %s", label, exc_info=True)
+
+    def _prompt_cache_request(
+        self, messages: List[Dict[str, Any]]
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Return the messages and call kwargs to send, with cache markers when they apply.
+
+        Markers are added only for the direct Anthropic adapter, only when the
+        flag is on, and only when the request carries a leading system prompt:
+        one explicit breakpoint on that block plus the top-level automatic one.
+        One-shot calls without a system prompt (context compaction, image
+        vision, title generation) are sent unchanged.
+        """
+        if getattr(self._llm, "_llm_type", None) != _DIRECT_ANTHROPIC_LLM_TYPE:
+            return messages, {}
+        if get_env_config().llm.vibe_trading_anthropic_prompt_cache is not True:
+            return messages, {}
+        prepared = prompt_cache_messages(messages)
+        if prepared is messages:
+            return messages, {}
+        return prepared, {"cache_control": dict(_PROMPT_CACHE_CONTROL)}
+
+    def _close_candidates(self) -> list[tuple[str, Any]]:
+        """Return unique clients this wrapper is responsible for closing."""
         llm = self._llm
-        for attr in ("root_client", "root_async_client", "client"):
-            client = getattr(llm, attr, None)
-            close_fn = getattr(client, "close", None)
-            if callable(close_fn):
-                try:
-                    close_fn()
-                except Exception:
-                    logger.debug("ChatLLM.close: failed to close %s", attr, exc_info=True)
+        if hasattr(llm, "_vibe_owned_http_clients"):
+            candidates = [
+                ("owned_http_client", client)
+                for client in llm._vibe_owned_http_clients
+            ]
+        else:
+            candidates = [
+                (attr, getattr(llm, attr, None))
+                for attr in ("root_client", "root_async_client", "client")
+            ]
+
+        unique: list[tuple[str, Any]] = []
+        seen: set[int] = set()
+        for label, client in candidates:
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            unique.append((label, client))
+        return unique
+
+    @staticmethod
+    def _run_or_schedule_close(awaitable: Any, label: str) -> None:
+        """Consume an async close from either synchronous or async code."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(awaitable)
+            return
+
+        task = loop.create_task(awaitable)
+
+        def _log_failure(done: asyncio.Task[Any]) -> None:
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.debug(
+                    "ChatLLM.close: async close failed for %s", label, exc_info=True
+                )
+
+        task.add_done_callback(_log_failure)
 
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None, timeout: Optional[int] = None) -> LLMResponse:
         """Call the LLM synchronously.
@@ -331,7 +464,8 @@ class ChatLLM:
         """
         llm = self._llm.bind_tools(tools) if tools else self._llm
         config = {"timeout": timeout} if timeout else {}
-        ai_message = llm.invoke(messages, config=config)
+        messages, call_kwargs = self._prompt_cache_request(messages)
+        ai_message = llm.invoke(messages, config=config, **call_kwargs)
         return self._parse_response(ai_message)
 
     def stream_chat(
@@ -369,12 +503,13 @@ class ChatLLM:
         try:
             llm = self._llm.bind_tools(tools) if tools else self._llm
             config = {"timeout": timeout} if timeout else {}
+            messages, call_kwargs = self._prompt_cache_request(messages)
             accumulated = None
             pending_text = ""
             possible_dsml_text = True
             cancelled = False
             last_chunk_ts = _time.monotonic()
-            for chunk in llm.stream(messages, config=config):
+            for chunk in llm.stream(messages, config=config, **call_kwargs):
                 now = _time.monotonic()
                 if idle_timeout_s and now - last_chunk_ts > idle_timeout_s:
                     # No delta for too long: the provider is stalled, not
@@ -412,7 +547,7 @@ class ChatLLM:
                     "Provider stream returned no chunks; falling back to "
                     "non-streaming invoke."
                 )
-                return self.chat(messages, tools=tools, timeout=timeout)
+                return self._parse_response(llm.invoke(messages, config=config, **call_kwargs))
             response = self._parse_response(accumulated)
             if pending_text and not (response.has_tool_calls and response.content == ""):
                 on_text_chunk(pending_text)
@@ -426,7 +561,7 @@ class ChatLLM:
                     "non-streaming invoke.",
                     type(exc).__name__,
                 )
-                return self.chat(messages, tools=tools, timeout=timeout)
+                return self._parse_response(llm.invoke(messages, config=config, **call_kwargs))
             _cfg = get_env_config()
             provider = _cfg.llm.langchain_provider.strip().lower() or "openai"
             model = self.model_name or _cfg.llm.langchain_model_name.strip() or "(unset)"

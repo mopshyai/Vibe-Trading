@@ -106,6 +106,26 @@ class AltmanZScore:
     distress_threshold: float
 
 
+def _require_finite(value: float, name: str) -> float:
+    """Check a value is a finite number, refusing NaN and infinity.
+
+    Args:
+        value: The candidate value.
+        name: Field name for the error message.
+
+    Returns:
+        ``value`` unchanged (its int/float type is preserved).
+
+    Raises:
+        ValueError: If the value is not a finite number. A non-finite input
+            here would otherwise flow through the range guards (which are all
+            false for NaN) and surface as a NaN score, probability or zone.
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return value
+
+
 def altman_z_score(
     *,
     working_capital: float,
@@ -152,6 +172,14 @@ def altman_z_score(
         raise ValueError(
             f"unknown model {model!r}; expected one of {tuple(ALTMAN_MODELS)}"
         )
+    working_capital = _require_finite(working_capital, "working_capital")
+    retained_earnings = _require_finite(retained_earnings, "retained_earnings")
+    ebit = _require_finite(ebit, "ebit")
+    equity_value = _require_finite(equity_value, "equity_value")
+    total_liabilities = _require_finite(total_liabilities, "total_liabilities")
+    total_assets = _require_finite(total_assets, "total_assets")
+    if revenue is not None:
+        revenue = _require_finite(revenue, "revenue")
     if total_assets == 0:
         raise ValueError("total_assets must be non-zero")
     if total_liabilities == 0:
@@ -288,6 +316,11 @@ def merton_asset_solve(
     Raises:
         ValueError: If any input is non-positive or system fails to converge.
     """
+    equity_value = _require_finite(equity_value, "equity_value")
+    equity_vol = _require_finite(equity_vol, "equity_vol")
+    debt_face = _require_finite(debt_face, "debt_face")
+    risk_free = _require_finite(risk_free, "risk_free")
+    horizon = _require_finite(horizon, "horizon")
     if min(equity_value, equity_vol, debt_face, horizon) <= 0:
         raise ValueError(
             "equity_value, equity_vol, debt_face and horizon must all be positive"
@@ -402,6 +435,11 @@ def distance_to_default(
         ValueError: If any of the value, volatility, default point or horizon is
             non-positive.
     """
+    asset_value = _require_finite(asset_value, "asset_value")
+    asset_vol = _require_finite(asset_vol, "asset_vol")
+    default_point = _require_finite(default_point, "default_point")
+    horizon = _require_finite(horizon, "horizon")
+    drift = _require_finite(drift, "drift")
     if min(asset_value, asset_vol, default_point, horizon) <= 0:
         raise ValueError(
             "asset_value, asset_vol, default_point and horizon must all be positive"
@@ -433,6 +471,9 @@ def kmv_default_point(
         ValueError: If either debt figure is negative, or the weight is outside
             ``[0, 1]``.
     """
+    short_term_debt = _require_finite(short_term_debt, "short_term_debt")
+    long_term_debt = _require_finite(long_term_debt, "long_term_debt")
+    long_term_weight = _require_finite(long_term_weight, "long_term_weight")
     if short_term_debt < 0 or long_term_debt < 0:
         raise ValueError("debt figures must be non-negative")
     if not 0.0 <= long_term_weight <= 1.0:
@@ -465,6 +506,9 @@ def kmv_distance_to_default(
     Raises:
         ValueError: If ``asset_value`` or ``asset_vol`` is non-positive.
     """
+    asset_value = _require_finite(asset_value, "asset_value")
+    asset_vol = _require_finite(asset_vol, "asset_vol")
+    default_point = _require_finite(default_point, "default_point")
     if asset_value <= 0 or asset_vol <= 0:
         raise ValueError("asset_value and asset_vol must be positive")
     return (asset_value - default_point) / (asset_value * asset_vol)
@@ -580,6 +624,9 @@ def credit_spread_analysis(
             ``lookback_periods`` is not positive, or if ``input_unit`` is
             unknown.
     """
+    window = _require_finite(window, "window")
+    lookback_periods = _require_finite(lookback_periods, "lookback_periods")
+    signal_z = _require_finite(signal_z, "signal_z")
     if window <= 0 or lookback_periods <= 0:
         raise ValueError("window and lookback_periods must be positive")
     if len(bond_yields) != len(risk_free_yields) or not bond_yields.index.equals(
@@ -668,6 +715,8 @@ def hazard_rate_to_survival_probability(hazard_rate: float, tenor_years: float) 
     Raises:
         ValueError: If hazard_rate or tenor_years is negative.
     """
+    hazard_rate = _require_finite(hazard_rate, "hazard_rate")
+    tenor_years = _require_finite(tenor_years, "tenor_years")
     if hazard_rate < 0.0 or tenor_years < 0.0:
         raise ValueError(f"hazard_rate and tenor_years must be non-negative, got {hazard_rate}, {tenor_years}")
     return float(np.exp(-hazard_rate * tenor_years))
@@ -686,6 +735,8 @@ def survival_probability_to_hazard_rate(survival_prob: float, tenor_years: float
     Raises:
         ValueError: If survival_prob is not in (0.0, 1.0] or tenor_years <= 0.
     """
+    survival_prob = _require_finite(survival_prob, "survival_prob")
+    tenor_years = _require_finite(tenor_years, "tenor_years")
     if survival_prob <= 0.0 or survival_prob > 1.0:
         raise ValueError(f"survival_prob must be in (0.0, 1.0], got {survival_prob}")
     if tenor_years <= 0.0:
@@ -740,6 +791,13 @@ def cds_price(
     Raises:
         ValueError: If spread_bps < 0, recovery_rate not in [0, 1), tenor_years <= 0, or notional <= 0.
     """
+    spread_bps = _require_finite(spread_bps, "spread_bps")
+    recovery_rate = _require_finite(recovery_rate, "recovery_rate")
+    tenor_years = _require_finite(tenor_years, "tenor_years")
+    risk_free_rate = _require_finite(risk_free_rate, "risk_free_rate")
+    coupon_bps = _require_finite(coupon_bps, "coupon_bps")
+    notional = _require_finite(notional, "notional")
+    payment_frequency = _require_finite(payment_frequency, "payment_frequency")
     if spread_bps < 0.0:
         raise ValueError(f"spread_bps must be non-negative, got {spread_bps}")
     if not (0.0 <= recovery_rate < 1.0):
@@ -820,6 +878,9 @@ def expected_loss(ead: float, pd: float, lgd: float) -> float:
     Raises:
         ValueError: If ead < 0, pd not in [0, 1], or lgd not in [0, 1].
     """
+    ead = _require_finite(ead, "ead")
+    pd = _require_finite(pd, "pd")
+    lgd = _require_finite(lgd, "lgd")
     if ead < 0.0:
         raise ValueError(f"ead must be non-negative, got {ead}")
     if not (0.0 <= pd <= 1.0):
@@ -862,6 +923,11 @@ def vasicek_credit_var(
     Raises:
         ValueError: If parameters violate domain constraints.
     """
+    ead = _require_finite(ead, "ead")
+    pd = _require_finite(pd, "pd")
+    lgd = _require_finite(lgd, "lgd")
+    asset_correlation = _require_finite(asset_correlation, "asset_correlation")
+    confidence = _require_finite(confidence, "confidence")
     if ead <= 0.0:
         raise ValueError(f"ead must be strictly positive, got {ead}")
     if not (0.0 < pd < 1.0):
@@ -918,6 +984,10 @@ def credit_spread_dv01(
         ValueError: If price, face, or par_amount is not positive, or if
             spread_duration is negative.
     """
+    spread_duration = _require_finite(spread_duration, "spread_duration")
+    price = _require_finite(price, "price")
+    face = _require_finite(face, "face")
+    par_amount = _require_finite(par_amount, "par_amount")
     if face <= 0.0 or price <= 0.0 or par_amount <= 0.0 or spread_duration < 0.0:
         raise ValueError("price, face, par_amount must be positive and spread_duration non-negative")
     return float(spread_duration * (price / face) * 1e-4 * par_amount)

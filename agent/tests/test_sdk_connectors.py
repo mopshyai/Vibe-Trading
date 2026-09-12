@@ -516,6 +516,91 @@ def test_binance_classification() -> None:
     assert BINANCE_TOOL_CLASS["create_order"] is ToolClass.WRITE
     assert BINANCE_TOOL_CLASS["cancel_order"] is ToolClass.WRITE
     assert BINANCE_TOOL_CLASS["fetch_balance"] is ToolClass.READ
+    assert BINANCE_TOOL_CLASS["load_markets"] is ToolClass.READ
+
+
+def test_binance_search_instruments_resolves_exact_active_spot_pair(monkeypatch) -> None:
+    class FakeExchange:
+        def load_markets(self):
+            return {
+                "ETH/USDT": {
+                    "id": "ETHUSDT",
+                    "symbol": "ETH/USDT",
+                    "spot": True,
+                    "active": True,
+                },
+                "ETH/USDT:USDT": {
+                    "id": "ETHUSDT",
+                    "symbol": "ETH/USDT:USDT",
+                    "spot": False,
+                    "active": True,
+                },
+                "BTC/USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT",
+                    "spot": True,
+                    "active": True,
+                },
+            }
+
+    monkeypatch.setattr(bn, "_exchange", lambda _cfg: FakeExchange())
+
+    result = bn.search_instruments(
+        "ETHUSDT",
+        config=bn.BinanceConfig(profile="paper"),
+    )
+
+    assert result == {
+        "status": "ok",
+        "query": "ETHUSDT",
+        "instruments": [
+            {
+                "symbol": "ETH-USDT",
+                "native_symbol": "ETH/USDT",
+                "exchange_symbol": "ETHUSDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "market": "crypto",
+                "type": "cryptocurrency",
+                "exchange": "BINANCE",
+                "active": True,
+            }
+        ],
+    }
+
+
+def test_binance_search_instruments_does_not_guess_prose(monkeypatch) -> None:
+    def _unexpected_exchange(_cfg):
+        raise AssertionError("prose lookup must not load the Binance market catalog")
+
+    monkeypatch.setattr(bn, "_exchange", _unexpected_exchange)
+
+    result = bn.search_instruments(
+        "Ethereum",
+        config=bn.BinanceConfig(profile="paper"),
+    )
+
+    assert result == {"status": "ok", "query": "Ethereum", "instruments": []}
+
+
+def test_service_routes_instrument_search_to_selected_binance_profile(monkeypatch) -> None:
+    captured = {}
+
+    def _search(query, *, config, limit):
+        captured.update(query=query, profile=config.profile, limit=limit)
+        return {"status": "ok", "instruments": [{"symbol": "ETH-USDT"}]}
+
+    monkeypatch.setattr(bn, "search_instruments", _search)
+
+    result = service.search_instruments(
+        "ETH-USDT",
+        "binance-paper-trade",
+        limit=3,
+    )
+
+    assert captured == {"query": "ETH-USDT", "profile": "paper", "limit": 3}
+    assert result["profile_id"] == "binance-paper-trade"
+    assert result["connector"] == "binance"
 
 
 def test_binance_service_unconfigured(monkeypatch, tmp_path) -> None:
@@ -789,10 +874,22 @@ def test_in_broker_paper_place_order_simulated_locally(mod, Config) -> None:
 
 @pytest.mark.parametrize("mod, Config", [(dh, dh.DhanConfig), (sh, sh.ShoonyaConfig)])
 def test_in_broker_paper_cancel_order_simulated(mod, Config) -> None:
-    result = mod.cancel_order(Config(profile="paper"), "ORD1")
+    placed = mod.place_order(Config(profile="paper"), symbol="RELIANCE", side="buy", quantity=10)
+    result = mod.cancel_order(Config(profile="paper"), placed["order_id"])
     assert result["status"] == "ok"
     assert result["cancelled"] is True
     assert result["is_paper"] is True
+
+
+@pytest.mark.parametrize("mod, Config", [(dh, dh.DhanConfig), (sh, sh.ShoonyaConfig)])
+def test_in_broker_paper_cancel_refuses_an_order_it_never_issued(mod, Config) -> None:
+    """The paper profile reads the real account, so a live order id can reach
+    the simulated cancel; acknowledging it would report a cancel that never
+    happened while the real order keeps working."""
+    result = mod.cancel_order(Config(profile="paper"), "ORD1")
+    assert result["status"] == "error"
+    assert "cancelled" not in result
+    assert "not issued by this paper simulator" in result["error"]
 
 
 def test_in_broker_order_ops_classified_write() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -12,6 +13,7 @@ from src.portfolio.config import (
 )
 from src.trading.connections import ConnectionStore
 from src.trading.profiles import profile_by_id
+from src.trading.types import TradingProfile
 
 
 def test_portfolio_settings_round_trip_without_credentials(tmp_path):
@@ -33,7 +35,8 @@ def test_portfolio_settings_round_trip_without_credentials(tmp_path):
     )
 
     assert store.load() == settings
-    assert (tmp_path / "portfolio.json").stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert (tmp_path / "portfolio.json").stat().st_mode & 0o777 == 0o600
     payload = json.loads((tmp_path / "portfolio.json").read_text(encoding="utf-8"))
     assert "api_key" not in json.dumps(payload)
     assert "profile_id" not in json.dumps(payload)
@@ -67,14 +70,31 @@ def test_new_install_starts_with_no_selected_sources(tmp_path):
     assert store.load().sources == ()
 
 
-def test_a_discovery_only_profile_cannot_back_a_portfolio_source():
+def test_a_discovery_only_profile_cannot_back_a_portfolio_source(
+    monkeypatch, tmp_path
+):
     """Tool discovery is not a holdings read, so such a profile is not eligible.
 
-    ``ibkr-live-official-mcp-readonly`` is read-only, but it declares only
-    ``mcp.read.discovery``: it can list the remote server's tools and nothing
-    else. Accepting it would create a source that fails on every refresh.
+    A remote profile can be read-only yet expose discovery and no holdings
+    reads. Accepting it would create a source that fails on every refresh.
     """
-    profile = profile_by_id("ibkr-live-official-mcp-readonly")
+    profile = TradingProfile(
+        id="discovery-only-test",
+        connector="test",
+        label="Discovery only",
+        environment="live",
+        transport="remote_mcp",
+        capabilities=("mcp.read.discovery",),
+        readonly=True,
+        config={"server": "test"},
+    )
+    original_profile_by_id = profile_by_id
+
+    def lookup(profile_id):
+        return profile if profile_id == profile.id else original_profile_by_id(profile_id)
+
+    monkeypatch.setattr("src.portfolio.config.profile_by_id", lookup)
+    monkeypatch.setattr("src.trading.connections.profile_by_id", lookup)
     assert profile.readonly is True
     assert profile.capabilities == ("mcp.read.discovery",)
     assert profile not in eligible_profiles()
@@ -91,10 +111,10 @@ def test_a_discovery_only_profile_cannot_back_a_portfolio_source():
                 "sources": [
                     {
                         "id": "discovery-only",
-                        "profile_id": "ibkr-live-official-mcp-readonly",
+                        "profile_id": profile.id,
                         "label": "Discovery only",
                     }
                 ],
             },
-            ConnectionStore(),
+            ConnectionStore(tmp_path / "connections.json"),
         )

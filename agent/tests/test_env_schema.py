@@ -124,6 +124,13 @@ class TestEnvConfigDefaults:
         assert c.data.longbridge_app_key == ""
         assert c.data.longbridge_app_secret == ""
         assert c.data.longbridge_access_token == ""
+        # Per-market source-order overrides default to unset (default chains).
+        for market in (
+            "a_share", "us_equity", "hk_equity", "india_equity", "kr_equity",
+            "ca_equity", "vietnam_equity", "crypto", "futures", "fund",
+            "macro", "forex", "index",
+        ):
+            assert getattr(c.data, f"market_data_order_{market}") == ""
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()
@@ -146,6 +153,8 @@ class TestEnvConfigDefaults:
         assert c.swarm.swarm_timeout == 1800
         assert c.swarm.swarm_heartbeat_interval_s == 3.0
         assert c.swarm.swarm_stream_retry_delay_s == 1.0
+        assert c.swarm.swarm_worker_retry_base_delay_s == 1.0
+        assert c.swarm.swarm_worker_retry_max_delay_s == 30.0
         assert c.swarm.swarm_grounding_max_symbols == 8
 
     def test_agent_tuning_defaults(self) -> None:
@@ -160,6 +169,7 @@ class TestEnvConfigDefaults:
         assert c.agent_tuning.content_filter_warning_threshold == 0.05
         assert c.agent_tuning.vibe_trading_enable_advisory is False
         assert c.agent_tuning.vibe_trading_enable_scheduler is False
+        assert c.agent_tuning.vibe_contextual_identity_constraints is True
         assert c.agent_tuning.vibe_trading_scheduler_max_consecutive_failures == 3
         assert c.agent_tuning.vibe_trading_scheduler_retry_base_delay_ms == 60_000
         assert c.agent_tuning.vibe_trading_scheduler_retry_max_delay_ms == 3_600_000
@@ -232,6 +242,13 @@ class TestEnvConfigTypeCoercion:
         assert tuning.vibe_trading_scheduler_max_consecutive_failures == 5
         assert tuning.vibe_trading_scheduler_retry_base_delay_ms == 2500
         assert tuning.vibe_trading_scheduler_retry_max_delay_ms == 10000
+
+    def test_contextual_identity_constraints_can_be_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_CONTEXTUAL_IDENTITY_CONSTRAINTS", "false")
+
+        assert EnvConfig().agent_tuning.vibe_contextual_identity_constraints is False
 
 
 # ===================================================================

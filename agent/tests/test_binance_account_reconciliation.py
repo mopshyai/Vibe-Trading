@@ -27,6 +27,44 @@ from backtest.perpetual_risk import (
 OBSERVED_AT = pd.Timestamp("2026-08-15T08:00:00Z")
 
 
+def _connector_observation(**changes: object) -> dict[str, object]:
+    observation: dict[str, object] = {
+        "status": "ok",
+        "schema_version": "binance-usdm-account-observation-v1",
+        "observed_at": "2026-08-15T08:00:00+00:00",
+        "source": "binance-usdm",
+        "source_profile": "binance-live-sdk-readonly",
+        "market_type": "usdm",
+        "configuration_hash": "a" * 64,
+        "account": {
+            "wallet_balance": 1_000.0,
+            "margin_balance": 1_100.0,
+            "available_balance": 490.0,
+            "total_unrealized_pnl": 100.0,
+            "total_initial_margin": 610.0,
+            "total_maintenance_margin": 24.4,
+            "open_order_initial_margin": 0.0,
+        },
+        "positions": [
+            {
+                "symbol": "BTC-USDT-PERP",
+                "quantity": 0.1,
+                "entry_price": 60_000.0,
+                "leverage": 10.0,
+                "margin_mode": "cross",
+                "isolated_margin": None,
+                "unrealized_pnl": 100.0,
+                "initial_margin": 610.0,
+                "maintenance_margin": 24.4,
+                "update_time": 1_787_664_600_000,
+            }
+        ],
+        "fidelity_flags": ["client_observation_time", "sequential_signed_reads"],
+    }
+    observation.update(changes)
+    return observation
+
+
 def _local_cross() -> tuple[AccountState, RiskSnapshot]:
     position = PositionState("BTC-USDT-PERP", 0.1, 60_000.0, 10.0, 3.0, None)
     account = AccountState(1_000.0, (position,), "cross")
@@ -78,6 +116,73 @@ def test_snapshot_contracts_are_frozen_and_reject_spot_sources() -> None:
         _exchange_cross(
             positions=(BinancePositionSnapshot("BTC", 0.1, 60_000.0, 10.0, "cross", None, 100.0, 610.0, 24.4),)
         )
+
+
+def test_connector_observation_normalizes_into_frozen_snapshot() -> None:
+    snapshot = reconciliation_module.snapshot_from_binance_usdm_observation(
+        _connector_observation()
+    )
+
+    assert snapshot == BinanceAccountSnapshot(
+        schema_version="binance-usdm-account-observation-v1",
+        observed_at=OBSERVED_AT,
+        source="binance-usdm",
+        source_profile="binance-live-sdk-readonly",
+        configuration_hash="a" * 64,
+        data_status="complete",
+        wallet_balance=1_000.0,
+        margin_balance=1_100.0,
+        available_balance=490.0,
+        total_unrealized_pnl=100.0,
+        total_initial_margin=610.0,
+        total_maintenance_margin=24.4,
+        positions=(
+            BinancePositionSnapshot(
+                "BTC-USDT-PERP",
+                0.1,
+                60_000.0,
+                10.0,
+                "cross",
+                None,
+                100.0,
+                610.0,
+                24.4,
+            ),
+        ),
+        fidelity_flags=("client_observation_time", "sequential_signed_reads"),
+    )
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        _connector_observation(status="error"),
+        _connector_observation(source="binance-spot"),
+        _connector_observation(market_type="spot"),
+        _connector_observation(schema_version="unexpected-schema"),
+        _connector_observation(fidelity_flags=[]),
+        _connector_observation(source_profile=None),
+        _connector_observation(source_profile="other-readonly"),
+        _connector_observation(configuration_hash=None),
+        _connector_observation(configuration_hash="not-a-sha256"),
+        _connector_observation(
+            account={
+                "wallet_balance": 1_000.0,
+                "margin_balance": 1_100.0,
+                "available_balance": 490.0,
+                "total_unrealized_pnl": 100.0,
+                "total_initial_margin": 610.0,
+                "total_maintenance_margin": 24.4,
+                "open_order_initial_margin": 1.0,
+            }
+        ),
+    ],
+)
+def test_connector_observation_normalizer_fails_closed(
+    observation: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        reconciliation_module.snapshot_from_binance_usdm_observation(observation)
 
 
 def test_matching_snapshot_completes_comparison_without_validation_claim() -> None:

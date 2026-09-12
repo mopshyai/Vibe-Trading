@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ModelPicker } from "@/components/settings/ModelPicker";
 import { QVerisSettings } from "@/components/settings/QVerisSettings"; // QVERIS-INTEGRATION
+import { SourcePrioritySettings } from "@/components/settings/SourcePrioritySettings";
 import { api, isAuthRequiredError, type ChannelRuntimeStatus, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
 import { getApiAuthKey, setApiAuthKey } from "@/lib/apiAuth";
 
@@ -774,6 +775,8 @@ export function Settings() {
           </div>
         </div>
       </form>
+
+      <SourcePrioritySettings />
     </div>
   );
 }

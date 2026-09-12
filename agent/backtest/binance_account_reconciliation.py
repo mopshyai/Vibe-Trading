@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 import pandas as pd
 
@@ -128,6 +128,96 @@ class BinanceAccountSnapshot:
             raise ValueError("fidelity flags must not be empty")
         if len(self.fidelity_flags) != len(set(self.fidelity_flags)):
             raise ValueError("fidelity flags must be unique")
+
+
+def snapshot_from_binance_usdm_observation(
+    observation: Mapping[str, Any],
+) -> BinanceAccountSnapshot:
+    """Normalize the strict connector payload into immutable offline evidence."""
+    if observation.get("status") != "ok":
+        raise ValueError("connector observation status must be ok")
+    if observation.get("source") != "binance-usdm":
+        raise ValueError("connector observation source must be binance-usdm")
+    if observation.get("market_type") != "usdm":
+        raise ValueError("connector observation market_type must be usdm")
+    if observation.get("schema_version") != "binance-usdm-account-observation-v1":
+        raise ValueError("unsupported connector observation schema_version")
+    if observation.get("source_profile") != "binance-live-sdk-readonly":
+        raise ValueError("connector observation source_profile is unsupported")
+    configuration_hash = observation.get("configuration_hash")
+    if not isinstance(configuration_hash, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", configuration_hash
+    ):
+        raise ValueError("connector observation configuration_hash must be SHA-256")
+
+    account = observation.get("account")
+    positions = observation.get("positions")
+    flags = observation.get("fidelity_flags")
+    if not isinstance(account, Mapping):
+        raise ValueError("connector observation account must be a mapping")
+    if not isinstance(positions, list):
+        raise ValueError("connector observation positions must be a list")
+    if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+        raise ValueError("connector observation fidelity_flags must be strings")
+    required_flags = {"client_observation_time", "sequential_signed_reads"}
+    if not required_flags.issubset(flags):
+        raise ValueError("connector observation is missing required fidelity flags")
+    if _observation_float(account, "open_order_initial_margin") != 0:
+        raise ValueError("connector observation must have zero open-order margin")
+
+    try:
+        normalized_positions = tuple(
+            BinancePositionSnapshot(
+                symbol=str(position["symbol"]),
+                quantity=_observation_float(position, "quantity"),
+                entry_price=_observation_float(position, "entry_price"),
+                leverage=_observation_float(position, "leverage"),
+                margin_mode=str(position["margin_mode"]),  # type: ignore[arg-type]
+                isolated_margin=(
+                    None
+                    if position.get("isolated_margin") is None
+                    else _observation_float(position, "isolated_margin")
+                ),
+                unrealized_pnl=_observation_float(position, "unrealized_pnl"),
+                initial_margin=_observation_float(position, "initial_margin"),
+                maintenance_margin=_observation_float(position, "maintenance_margin"),
+            )
+            for position in positions
+            if isinstance(position, Mapping)
+        )
+        if len(normalized_positions) != len(positions):
+            raise ValueError("connector observation position must be a mapping")
+        observed_at = pd.Timestamp(observation["observed_at"])
+        return BinanceAccountSnapshot(
+            schema_version="binance-usdm-account-observation-v1",
+            observed_at=_require_utc_timestamp(observed_at, "observed_at"),
+            source="binance-usdm",
+            source_profile="binance-live-sdk-readonly",
+            configuration_hash=configuration_hash,
+            data_status="complete",
+            wallet_balance=_observation_float(account, "wallet_balance"),
+            margin_balance=_observation_float(account, "margin_balance"),
+            available_balance=_observation_float(account, "available_balance"),
+            total_unrealized_pnl=_observation_float(account, "total_unrealized_pnl"),
+            total_initial_margin=_observation_float(account, "total_initial_margin"),
+            total_maintenance_margin=_observation_float(
+                account, "total_maintenance_margin"
+            ),
+            positions=normalized_positions,
+            fidelity_flags=tuple(flags),
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("connector observation is missing required fields") from exc
+
+
+def _observation_float(values: Mapping[str, Any], field: str) -> float:
+    try:
+        value = float(values[field])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"connector observation field {field} must be numeric") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"connector observation field {field} must be finite")
+    return value
 
 
 @dataclass(frozen=True)

@@ -212,6 +212,27 @@ def test_combinatorial_holds_out_more_than_one_block_at_a_time():
         assert split.test.size >= 3 * (n // 6) - 3
 
 
+def test_combinatorial_gap_between_test_blocks_stays_trainable():
+    # Rows between two held-out blocks belong to neither test segment, so
+    # with zero-width labels and no embargo they must survive the purge.
+    n = 600
+    labels = np.arange(n)
+    saw_gap = False
+    for split in combinatorial_purged_splits(
+        n, labels, n_groups=6, n_test_groups=2, embargo_fraction=0.0
+    ):
+        test = np.sort(split.test)
+        blocks = np.split(test, np.flatnonzero(np.diff(test) > 1) + 1)
+        if len(blocks) < 2:
+            continue  # adjacent held-out groups merge into one segment
+        saw_gap = True
+        for left, right in zip(blocks, blocks[1:]):
+            gap = np.arange(left[-1] + 1, right[0])
+            assert gap.size > 0
+            assert np.isin(gap, split.train).all()
+    assert saw_gap
+
+
 # --- label end times as a pandas Series of timestamps ---
 
 
@@ -298,6 +319,16 @@ def test_bad_embargo_fraction_rejected(fraction):
 def test_mismatched_label_length_rejected():
     with pytest.raises(ValueError, match="entries but the sample has"):
         list(purged_kfold_splits(100, np.arange(50), n_folds=4))
+
+
+def test_excessive_embargo_removing_all_training_samples_rejected():
+    # A 2-fold split with 80% embargo removes all training samples
+    with pytest.raises(ValueError, match="removed all training samples"):
+        list(purged_kfold_splits(10, np.arange(10), n_folds=2, embargo_fraction=0.8))
+
+    groups = [1, 1, 2, 2]
+    with pytest.raises(ValueError, match="removed all training samples"):
+        list(group_purged_kfold_splits(groups, n_folds=2, embargo_fraction=0.8))
 
 
 @pytest.mark.parametrize("n_test_groups", [0, 6, 7])

@@ -84,6 +84,16 @@ os.environ["HOME"] = str(_SANDBOX_HOME)
 os.environ["USERPROFILE"] = str(_SANDBOX_HOME)
 (_SANDBOX_HOME / ".vibe-trading").mkdir(parents=True, exist_ok=True)
 
+# A developer shell that exports MARKET_DATA_ORDER_* would silently reorder
+# the default fallback chains (registry.refresh_source_order_overrides reads
+# them at import time), breaking every default-order assertion in the suite.
+# Scrub them for the session; override tests set them explicitly and restore
+# defaults themselves. Must run before any test module imports the registry.
+_PRIOR_SOURCE_ORDER_ENV = {
+    key: os.environ.pop(key)
+    for key in [k for k in list(os.environ) if k.startswith("MARKET_DATA_ORDER_")]
+}
+
 # Tests that spawn a subprocess hand it this environment, HOME included. On a
 # machine whose dependencies live in the per-user site directory -- what
 # ``pip install --user`` does, and the default when no virtualenv is active --
@@ -134,6 +144,7 @@ def _teardown_sandbox() -> None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = prior
+    os.environ.update(_PRIOR_SOURCE_ORDER_ENV)
 
 
 # Safety net for e.g. `--collect-only` (no fixtures run) and abnormal exits.
