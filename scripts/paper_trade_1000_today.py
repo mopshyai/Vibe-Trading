@@ -57,12 +57,26 @@ def state_path() -> Path:
     return Path.home() / ".vibe-trading" / "automation" / day / "budget-1000-state.json"
 
 
+def read_state() -> dict | None:
+    path = state_path()
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def write_state(payload: dict) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
+
+
+def seconds_until_flatten(now: datetime | None = None) -> float:
+    """Return seconds until today's forced intraday flatten deadline."""
+    current = now or datetime.now(ET)
+    deadline = datetime.combine(current.date(), FLATTEN_TIME, ET)
+    return max(0.0, (deadline - current).total_seconds())
 
 
 def order_terms(signal) -> tuple[int, float, float, float] | None:
@@ -81,11 +95,55 @@ def order_terms(signal) -> tuple[int, float, float, float] | None:
     return qty, entry, stop, target
 
 
+def flatten_trade(trading: TradingClient) -> int:
+    state = read_state()
+    if state is None:
+        print("FLATTEN no_budget_trade_state", flush=True)
+        return 0
+    if state.get("flattened_at"):
+        print("FLATTEN already_flattened", flush=True)
+        return 0
+
+    symbol = state["symbol"]
+    for order in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)):
+        if str(order.symbol) == symbol:
+            try:
+                trading.cancel_order_by_id(order.id)
+            except Exception:
+                pass
+    try:
+        trading.close_position(symbol)
+        print(f"FLATTENED PAPER {symbol}", flush=True)
+    except Exception:
+        print(f"FLATTEN no_open_position {symbol}", flush=True)
+
+    state["flattened_at"] = datetime.now(ET).isoformat()
+    write_state(state)
+    return 0
+
+
+def monitor_until_flatten(trading: TradingClient) -> int:
+    """Keep the automation alive until its hard 15:50 ET exit boundary."""
+    while True:
+        remaining = seconds_until_flatten()
+        if remaining <= 0:
+            return flatten_trade(trading)
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
 def monitor() -> int:
     strategy, trading, data = clients()
-    if state_path().exists():
-        print("NO_TRADE daily_trade_already_recorded", flush=True)
-        return 0
+    existing_state = read_state()
+    if existing_state is not None:
+        if existing_state.get("flattened_at"):
+            print("NO_TRADE daily_trade_already_recorded", flush=True)
+            return 0
+        print(
+            f"RESUME PAPER symbol={existing_state.get('symbol', 'unknown')} awaiting_flatten={FLATTEN_TIME}",
+            flush=True,
+        )
+        return monitor_until_flatten(trading)
+
     clock = trading.get_clock()
     if not clock.is_open:
         print("NO_TRADE market_closed", flush=True)
@@ -142,7 +200,7 @@ def monitor() -> int:
                 f"notional={qty * entry:.2f} risk={qty * abs(entry - stop):.2f}",
                 flush=True,
             )
-            return 0
+            return monitor_until_flatten(trading)
         time.sleep(POLL_SECONDS)
     print("NO_TRADE no_valid_signal_before_1030", flush=True)
     return 0
@@ -150,24 +208,7 @@ def monitor() -> int:
 
 def flatten() -> int:
     _, trading, _ = clients()
-    path = state_path()
-    if not path.exists():
-        print("FLATTEN no_budget_trade_state", flush=True)
-        return 0
-    state = json.loads(path.read_text(encoding="utf-8"))
-    symbol = state["symbol"]
-    for order in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)):
-        if str(order.symbol) == symbol:
-            try:
-                trading.cancel_order_by_id(order.id)
-            except Exception:
-                pass
-    try:
-        trading.close_position(symbol)
-        print(f"FLATTENED PAPER {symbol}", flush=True)
-    except Exception:
-        print(f"FLATTEN no_open_position {symbol}", flush=True)
-    return 0
+    return flatten_trade(trading)
 
 
 def main() -> int:
